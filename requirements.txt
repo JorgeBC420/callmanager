@@ -1,0 +1,14 @@
+﻿flask>=2.0
+flask-cors
+flask-socketio
+eventlet
+sqlalchemy
+pandas
+openpyxl
+customtkinter
+python-socketio[client]
+requests
+pywinauto
+python-dateutil
+pywinauto
+
