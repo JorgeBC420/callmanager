@@ -205,3 +205,36 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ========== CallManager Project Specific ==========
+# Database files
+*.db
+*.db-shm
+*.db-wal
+contacts.db
+contacts.db-shm
+contacts.db-wal
+
+# Backups
+backups/
+*.backup
+
+# Logs
+*.log
+callmanager.log
+
+# Local config (secrets)
+config_local.json
+config_local.py
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
