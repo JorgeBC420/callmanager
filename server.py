@@ -12,7 +12,6 @@ import json
 import os
 import logging
 import shutil
-from datetime import datetime as dt_now
 import re
 from functools import wraps
 from dateutil.relativedelta import relativedelta
@@ -127,13 +126,13 @@ class Contact(Base):
     assigned_to_user_id = Column(String, index=True)  # Usuario asignado
     assigned_to_team_id = Column(String, index=True)  # Equipo asignado
     assigned_to_team_name = Column(String)
-    last_visibility_time = Column(DateTime, default=dt_now, index=True)  # Cuándo se vio por última vez
+    last_visibility_time = Column(DateTime, default=datetime.utcnow, index=True)  # Cuándo se vio por última vez
     editors_history = Column(Text, default="[]")
     locked_by = Column(String, index=True)
     locked_until = Column(DateTime, index=True)
     reminder_time = Column(DateTime)
-    created_at = Column(DateTime, default=dt_now, index=True)
-    updated_at = Column(DateTime, default=dt_now, onupdate=dt_now, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
     version = Column(Integer, default=1)  # Versión para optimistic locking (incrementa con cada update)
 
 
@@ -159,8 +158,8 @@ class User(Base):
     email = Column(String)
     is_active = Column(Integer, default=1, index=True)  # 1 = activo, 0 = inactivo
     last_login = Column(DateTime)
-    created_at = Column(DateTime, default=dt_now, index=True)
-    updated_at = Column(DateTime, default=dt_now, onupdate=dt_now, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
 
 
 class UserMetrics(Base):
@@ -178,7 +177,7 @@ class UserMetrics(Base):
     calls_failed = Column(Integer, default=0)
     contacts_managed = Column(Integer, default=0)
     avg_call_duration = Column(Integer, default=0)  # en segundos
-    last_updated = Column(DateTime, default=dt_now, onupdate=dt_now)
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 Base.metadata.create_all(engine)
@@ -336,9 +335,9 @@ def update_contact_status_by_visibility(contact):
     """
     try:
         if not contact.last_visibility_time:
-            contact.last_visibility_time = contact.created_at or dt_now.now()
+            contact.last_visibility_time = contact.created_at or datetime.now()
         
-        now = dt_now.now()
+        now = datetime.now()
         
         # Calcular cuántos meses sin visibilidad
         for status_name, (months_threshold, description) in STATUS_AUTO_RULES.items():
@@ -410,7 +409,7 @@ def create_backup():
             logger.debug("No database file to backup yet")
             return
         
-        timestamp = dt_now.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_file = os.path.join(BACKUP_DIR, f"contacts_backup_{timestamp}.db")
         shutil.copy2(DATABASE_PATH, backup_file)
         logger.info(f"Backup created: {backup_file}")
@@ -425,7 +424,7 @@ def create_backup():
 def cleanup_old_backups():
     """Eliminar backups más antiguos que BACKUP_KEEP_DAYS"""
     try:
-        cutoff_time = dt_now.now().timestamp() - (BACKUP_KEEP_DAYS * 86400)
+        cutoff_time = datetime.now().timestamp() - (BACKUP_KEEP_DAYS * 86400)
         for fname in os.listdir(BACKUP_DIR):
             fpath = os.path.join(BACKUP_DIR, fname)
             if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff_time:
@@ -441,7 +440,7 @@ def contact_to_dict(r):
         # Incluir información de estado dinámico
         visibility_months = None
         if r.last_visibility_time:
-            delta = relativedelta(dt_now.now(), r.last_visibility_time)
+            delta = relativedelta(datetime.now(), r.last_visibility_time)
             visibility_months = delta.months + (delta.years * 12)
         
         return {
@@ -473,7 +472,7 @@ def cleanup_expired_locks():
     db = Session()
     try:
         expired = db.query(Contact).filter(
-            Contact.locked_until < dt_now.utcnow(),
+            Contact.locked_until < datetime.utcnow(),
             Contact.locked_by.isnot(None)
         ).all()
         
@@ -560,9 +559,9 @@ def import_contacts():
                         obj.note = note
                     
                     # Registrar que fue actualizado
-                    obj.updated_at = dt_now.utcnow()
+                    obj.updated_at = datetime.utcnow()
                     # ⭐ NUEVO: Registrar que se vio (reset de visibilidad)
-                    obj.last_visibility_time = dt_now.utcnow()
+                    obj.last_visibility_time = datetime.utcnow()
                     
                     logger.info(f"Updated existing contact: {cid} ({old_name} → {obj.name})")
                     updated += 1
@@ -578,7 +577,7 @@ def import_contacts():
                         note=note,
                         coords=json.dumps(c.get('coords') or {}),
                         editors_history=json.dumps([]),
-                        last_visibility_time=dt_now.utcnow(),  # ⭐ NUEVO: Inicializar visibilidad
+                        last_visibility_time=datetime.utcnow(),  # ⭐ NUEVO: Inicializar visibilidad
                         version=1
                     )
                     db.add(obj)
@@ -667,7 +666,7 @@ def on_update(data):
 
         # Validar que no esté bloqueado por otro usuario
         if obj.locked_by and obj.locked_by != user:
-            if obj.locked_until and obj.locked_until > dt_now.utcnow():
+            if obj.locked_until and obj.locked_until > datetime.utcnow():
                 logger.warning(f"Update denied: {cid} locked by {obj.locked_by}")
                 emit('lock_denied', {
                     'id': cid,
@@ -693,7 +692,7 @@ def on_update(data):
                     'field': 'name',
                     'old': obj.name,
                     'new': new_name,
-                    'ts': dt_now.utcnow().isoformat()
+                    'ts': datetime.utcnow().isoformat()
                 })
                 obj.editors_history = json.dumps(hist[:20])  # Guardar últimos 20 cambios
                 obj.name = new_name
@@ -722,8 +721,8 @@ def on_update(data):
 
         if changes_made:
             obj.last_called_by = user
-            obj.last_called_time = dt_now.utcnow()
-            obj.updated_at = dt_now.utcnow()
+            obj.last_called_time = datetime.utcnow()
+            obj.updated_at = datetime.utcnow()
             db.commit()
             logger.info(f"Contact {cid} updated by {user}")
 
@@ -731,7 +730,7 @@ def on_update(data):
                 'id': cid,
                 'fields': fields,
                 'user': user,
-                'ts': dt_now.utcnow().isoformat(),
+                'ts': datetime.utcnow().isoformat(),
                 'contact': contact_to_dict(obj)
             }, broadcast=True)
         else:
@@ -767,7 +766,7 @@ def on_lock(data):
 
         # Si está bloqueado por otro usuario y todavía vigente, rechazar
         if obj.locked_by and obj.locked_by != user:
-            if obj.locked_until and obj.locked_until > dt_now.utcnow():
+            if obj.locked_until and obj.locked_until > datetime.utcnow():
                 logger.warning(f"Lock denied for {cid}: already locked by {obj.locked_by}")
                 emit('lock_denied', {
                     'id': cid,
@@ -778,7 +777,7 @@ def on_lock(data):
                 return
 
         obj.locked_by = user
-        obj.locked_until = dt_now.utcnow() + timedelta(minutes=dur)
+        obj.locked_until = datetime.utcnow() + timedelta(minutes=dur)
         db.commit()
         logger.info(f"Contact {cid} locked by {user} for {dur} minutes")
 
@@ -826,7 +825,7 @@ def on_unlock(data):
             socketio.emit('contact_unlocked', {
                 'id': cid,
                 'unlocked_by': user,
-                'ts': dt_now.utcnow().isoformat()
+                'ts': datetime.utcnow().isoformat()
             }, broadcast=True)
         else:
             logger.debug(f"Unlock request for already unlocked contact {cid}")
@@ -1049,7 +1048,7 @@ def health_check():
         db = Session()
         db.execute("SELECT 1")
         db.remove()
-        return jsonify({'status': 'healthy', 'timestamp': dt_now}), 200
+        return jsonify({'status': 'healthy', 'timestamp': datetime.utcnow()}), 200
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
