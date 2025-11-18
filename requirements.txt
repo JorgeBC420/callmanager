@@ -10,5 +10,8 @@ python-socketio[client]
 requests
 pywinauto
 python-dateutil
-pywinauto
+python-dotenv>=0.21.0
+Flask-Limiter>=3.3.1
+gunicorn>=20.1.0
+mypy>=1.0.0
 

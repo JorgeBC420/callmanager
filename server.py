@@ -1,9 +1,12 @@
 ﻿from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
-from sqlalchemy import create_engine, Column, String, Text, DateTime
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from sqlalchemy import create_engine, Column, String, Text, DateTime, Integer, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.pool import Pool
 from datetime import datetime, timedelta
 import json
 import os
@@ -14,7 +17,7 @@ import re
 from functools import wraps
 from dateutil.relativedelta import relativedelta
 
-# Importar configuración centralizada
+# Importar configuración centralizada (carga .env automáticamente)
 try:
     from config import *
 except ImportError:
@@ -36,6 +39,10 @@ except ImportError:
     MAX_NAME_LENGTH = 200
     MAX_NOTE_LENGTH = 2000
     AUTH_TOKENS = {'dev-key-change-in-production': 'Desarrollador'}
+    RATE_LIMIT_PER_HOUR = 1000
+    IMPORT_RATE_LIMIT_PER_MINUTE = 10
+    DB_POOL_SIZE = 10
+    DB_MAX_OVERFLOW = 20
 
 # ========== LOGGING ==========
 logging.basicConfig(
@@ -51,21 +58,54 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 app.config['SECRET_KEY'] = SECRET_KEY
+
+# ========== RATE LIMITING ==========
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=[f"{RATE_LIMIT_PER_HOUR} per hour"]
+)
+
 socketio = SocketIO(app, cors_allowed_origins=SOCKETIO_CORS_ORIGINS, async_mode=SOCKETIO_ASYNC_MODE)
 
 logger.info("=" * 60)
 logger.info("CallManager Server Starting")
 logger.info(f"Host: {SERVER_HOST}, Port: {SERVER_PORT}")
+logger.info(f"Rate Limiting: {RATE_LIMIT_PER_HOUR}/hora (global), {IMPORT_RATE_LIMIT_PER_MINUTE}/min (import)")
 logger.info("=" * 60)
 
 # ========== DATABASE SETUP ==========
 os.makedirs(BACKUP_DIR, exist_ok=True)
 
-engine = create_engine(f'sqlite:///{DATABASE_PATH}',
-                       connect_args={"check_same_thread": False},
-                       pool_pre_ping=True,
-                       pool_size=10,
-                       max_overflow=20)
+engine = create_engine(
+    f'sqlite:///{DATABASE_PATH}',
+    connect_args={"check_same_thread": False},
+    pool_pre_ping=True,
+    pool_size=DB_POOL_SIZE,
+    max_overflow=DB_MAX_OVERFLOW
+)
+
+# ========== HABILITAR WAL MODE PARA MEJOR CONCURRENCIA ==========
+@event.listens_for(Pool, "connect")
+def set_sqlite_pragma(dbapi_conn, connection_record):
+    """
+    Habilitar Write-Ahead Logging (WAL) en SQLite.
+    Beneficios:
+    - Múltiples lecturas simultáneas sin bloqueos
+    - Mejor performance con concurrencia
+    - Protección contra corrupciones
+    """
+    cursor = dbapi_conn.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA cache_size=10000")
+        cursor.execute("PRAGMA temp_store=MEMORY")
+        dbapi_conn.commit()
+        logger.debug("✅ WAL mode habilitado para SQLite")
+    except Exception as e:
+        logger.warning(f"⚠️ No se pudo habilitar WAL mode: {e}")
+
 Base = declarative_base()
 session_factory = sessionmaker(bind=engine)
 Session = scoped_session(session_factory)
@@ -90,7 +130,7 @@ class Contact(Base):
     reminder_time = Column(DateTime)
     created_at = Column(DateTime, default=dt_now, index=True)
     updated_at = Column(DateTime, default=dt_now, onupdate=dt_now, index=True)
-    version = Column(String, default="1.0")  # Versionado para control de cambios
+    version = Column(Integer, default=1)  # Versión para optimistic locking (incrementa con cada update)
 
 
 Base.metadata.create_all(engine)
@@ -317,7 +357,7 @@ def contact_to_dict(r):
             'editors_history': json.loads(r.editors_history or '[]'),
             'created_at': r.created_at.isoformat() if hasattr(r, 'created_at') and r.created_at else None,
             'updated_at': r.updated_at.isoformat() if hasattr(r, 'updated_at') and r.updated_at else None,
-            'version': r.version if hasattr(r, 'version') else "1.0"
+            'version': r.version if hasattr(r, 'version') else 1
         }
     except Exception as e:
         logger.error(f"Error converting contact {r.id}: {e}")
@@ -350,6 +390,7 @@ def cleanup_expired_locks():
 
 
 @app.route('/import', methods=['POST'])
+@limiter.limit(f"{IMPORT_RATE_LIMIT_PER_MINUTE} per minute")  # Rate limiting: máximo N imports por minuto
 @require_auth
 def import_contacts():
     """
@@ -434,7 +475,7 @@ def import_contacts():
                         coords=json.dumps(c.get('coords') or {}),
                         editors_history=json.dumps([]),
                         last_visibility_time=dt_now.utcnow(),  # ⭐ NUEVO: Inicializar visibilidad
-                        version="1.0"
+                        version=1
                     )
                     db.add(obj)
                     inserted += 1
