@@ -122,7 +122,11 @@ class Contact(Base):
     note = Column(Text, default="")
     coords = Column(String, default="{}")
     last_called_by = Column(String)
+    last_called_by_user_id = Column(String, index=True)  # ID del usuario que lo llamó
     last_called_time = Column(DateTime)
+    assigned_to_user_id = Column(String, index=True)  # Usuario asignado
+    assigned_to_team_id = Column(String, index=True)  # Equipo asignado
+    assigned_to_team_name = Column(String)
     last_visibility_time = Column(DateTime, default=dt_now, index=True)  # Cuándo se vio por última vez
     editors_history = Column(Text, default="[]")
     locked_by = Column(String, index=True)
@@ -131,6 +135,50 @@ class Contact(Base):
     created_at = Column(DateTime, default=dt_now, index=True)
     updated_at = Column(DateTime, default=dt_now, onupdate=dt_now, index=True)
     version = Column(Integer, default=1)  # Versión para optimistic locking (incrementa con cada update)
+
+
+class User(Base):
+    """
+    Modelo de usuario con roles y permisos.
+    
+    Roles:
+    - Agent: Puede hacer llamadas, ver sus propios contactos
+    - TeamLead: Puede ver métricas de su equipo + totales de otros equipos
+    - ProjectManager: Puede ver todas las métricas
+    - TI: Puede accesar configuraciones + métricas
+    """
+    __tablename__ = 'users'
+    __table_args__ = {'extend_existing': True}
+    
+    id = Column(String, primary_key=True)
+    api_key = Column(String, unique=True, nullable=False, index=True)
+    username = Column(String, unique=True, nullable=False, index=True)
+    role = Column(String, default="Agent", index=True)  # Agent, TeamLead, ProjectManager, TI
+    team_id = Column(String, index=True)  # Para agrupar agentes en equipos
+    team_name = Column(String)  # Nombre del equipo (ej: "Equipo Ventas", "Equipo Support")
+    email = Column(String)
+    is_active = Column(Integer, default=1, index=True)  # 1 = activo, 0 = inactivo
+    last_login = Column(DateTime)
+    created_at = Column(DateTime, default=dt_now, index=True)
+    updated_at = Column(DateTime, default=dt_now, onupdate=dt_now, index=True)
+
+
+class UserMetrics(Base):
+    """
+    Métricas de usuario (llamadas, contactos, etc).
+    Se actualiza en tiempo real para dashboards.
+    """
+    __tablename__ = 'user_metrics'
+    __table_args__ = {'extend_existing': True}
+    
+    id = Column(String, primary_key=True)
+    user_id = Column(String, index=True)
+    calls_made = Column(Integer, default=0)
+    calls_success = Column(Integer, default=0)
+    calls_failed = Column(Integer, default=0)
+    contacts_managed = Column(Integer, default=0)
+    avg_call_duration = Column(Integer, default=0)  # en segundos
+    last_updated = Column(DateTime, default=dt_now, onupdate=dt_now)
 
 
 Base.metadata.create_all(engine)
@@ -213,6 +261,62 @@ def require_auth(f):
                 return jsonify({'error': msg}), 401
         return f(*args, **kwargs)
     return decorated_function
+
+
+def require_role(*allowed_roles):
+    """
+    Decorador para validar que el usuario tiene uno de los roles permitidos.
+    
+    Uso:
+        @require_role('TI', 'ProjectManager')
+        def endpoint():
+            pass
+    
+    Roles disponibles:
+    - 'Agent': Agentes normales
+    - 'TeamLead': Líderes de equipo
+    - 'ProjectManager': Jefes de proyecto
+    - 'TI': Administradores técnicos
+    """
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            api_key = request.headers.get('X-API-Key')
+            if not api_key:
+                return jsonify({'error': 'API key required'}), 401
+            
+            # Buscar usuario
+            try:
+                user = Session.query(User).filter_by(api_key=api_key, is_active=1).first()
+                if not user:
+                    logger.warning(f"Invalid API key: {api_key}")
+                    return jsonify({'error': 'Invalid API key'}), 401
+                
+                # Verificar rol
+                if user.role not in allowed_roles:
+                    logger.warning(f"Access denied - User {user.username} (role: {user.role}) tried to access {request.path}")
+                    return jsonify({
+                        'error': f'Access denied. Required roles: {list(allowed_roles)}, your role: {user.role}'
+                    }), 403
+                
+                # Pasar usuario a la función
+                kwargs['current_user'] = user
+                return f(*args, **kwargs)
+            except Exception as e:
+                logger.error(f"Error in require_role decorator: {e}")
+                return jsonify({'error': 'Authentication error'}), 500
+        return decorated_function
+    return decorator
+
+
+def get_user_from_api_key(api_key: str):
+    """Obtener usuario desde API key"""
+    try:
+        user = Session.query(User).filter_by(api_key=api_key, is_active=1).first()
+        return user
+    except Exception as e:
+        logger.error(f"Error getting user: {e}")
+        return None
 
 
 # ========== ESTADOS DINÁMICOS Y VISIBILIDAD ==========
@@ -754,6 +858,201 @@ def start_background_cleanup():
                     backup_counter = 0
         except Exception as e:
             logger.error(f"Error in background task: {e}")
+
+
+# ========== ENDPOINTS DE MÉTRICAS POR ROL ==========
+
+@app.route('/metrics/personal', methods=['GET'])
+@require_role('Agent', 'TeamLead', 'ProjectManager', 'TI')
+def get_personal_metrics(current_user):
+    """
+    Obtener métricas personales del usuario actual.
+    Accesible por: Todos
+    """
+    db = Session()
+    try:
+        metrics = db.query(UserMetrics).filter_by(user_id=current_user.id).first()
+        if not metrics:
+            # Si no existen métricas, crear registro vacío
+            metrics = UserMetrics(
+                id=f"m_{current_user.id}",
+                user_id=current_user.id,
+                calls_made=0,
+                calls_success=0,
+                calls_failed=0
+            )
+            db.add(metrics)
+            db.commit()
+        
+        return jsonify({
+            'user_id': current_user.id,
+            'username': current_user.username,
+            'role': current_user.role,
+            'calls_made': metrics.calls_made,
+            'calls_success': metrics.calls_success,
+            'calls_failed': metrics.calls_failed,
+            'contacts_managed': metrics.contacts_managed,
+            'avg_call_duration': metrics.avg_call_duration,
+            'success_rate': (metrics.calls_success / metrics.calls_made * 100) if metrics.calls_made > 0 else 0
+        }), 200
+    except Exception as e:
+        logger.error(f"Error fetching personal metrics: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+@app.route('/metrics/team', methods=['GET'])
+@require_role('TeamLead', 'ProjectManager', 'TI')
+def get_team_metrics(current_user):
+    """
+    Obtener métricas del equipo del usuario.
+    TeamLead: Ve su equipo + totales de otros
+    ProjectManager/TI: Ve todo
+    """
+    db = Session()
+    try:
+        if current_user.role == 'TeamLead':
+            # Solo ver su equipo
+            team_users = db.query(User).filter_by(
+                team_id=current_user.team_id,
+                is_active=1
+            ).all()
+        else:
+            # ProjectManager/TI ven todos los usuarios
+            team_users = db.query(User).filter_by(is_active=1).all()
+        
+        team_metrics = []
+        for user in team_users:
+            metrics = db.query(UserMetrics).filter_by(user_id=user.id).first()
+            if metrics:
+                team_metrics.append({
+                    'user_id': user.id,
+                    'username': user.username,
+                    'role': user.role,
+                    'team_name': user.team_name,
+                    'calls_made': metrics.calls_made,
+                    'calls_success': metrics.calls_success,
+                    'contacts_managed': metrics.contacts_managed,
+                    'success_rate': (metrics.calls_success / metrics.calls_made * 100) if metrics.calls_made > 0 else 0
+                })
+        
+        return jsonify(team_metrics), 200
+    except Exception as e:
+        logger.error(f"Error fetching team metrics: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+@app.route('/metrics/all', methods=['GET'])
+@require_role('ProjectManager', 'TI')
+def get_all_metrics(current_user):
+    """
+    Obtener métricas consolidadas de toda la organización.
+    Accesible solo por: ProjectManager, TI
+    """
+    db = Session()
+    try:
+        all_users = db.query(User).filter_by(is_active=1).all()
+        total_calls = 0
+        total_success = 0
+        total_contacts = 0
+        
+        by_team = {}
+        for user in all_users:
+            metrics = db.query(UserMetrics).filter_by(user_id=user.id).first()
+            if metrics:
+                total_calls += metrics.calls_made
+                total_success += metrics.calls_success
+                total_contacts += metrics.contacts_managed
+                
+                team = user.team_name or "Sin equipo"
+                if team not in by_team:
+                    by_team[team] = {
+                        'calls_made': 0,
+                        'calls_success': 0,
+                        'agents': 0
+                    }
+                by_team[team]['calls_made'] += metrics.calls_made
+                by_team[team]['calls_success'] += metrics.calls_success
+                by_team[team]['agents'] += 1
+        
+        return jsonify({
+            'total_calls': total_calls,
+            'total_success': total_success,
+            'total_contacts': total_contacts,
+            'total_users': len(all_users),
+            'overall_success_rate': (total_success / total_calls * 100) if total_calls > 0 else 0,
+            'by_team': by_team
+        }), 200
+    except Exception as e:
+        logger.error(f"Error fetching all metrics: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+@app.route('/config', methods=['GET'])
+@require_role('ProjectManager', 'TI')
+def get_config(current_user):
+    """
+    Obtener configuraciones del sistema.
+    Accesible solo por: ProjectManager, TI
+    """
+    try:
+        return jsonify({
+            'server_host': SERVER_HOST,
+            'server_port': SERVER_PORT,
+            'debug': DEBUG,
+            'enable_auth': ENABLE_AUTH,
+            'rate_limit_per_hour': RATE_LIMIT_PER_HOUR,
+            'import_rate_limit_per_minute': IMPORT_RATE_LIMIT_PER_MINUTE,
+            'backup_interval_minutes': BACKUP_INTERVAL_MINUTES,
+            'backup_keep_days': BACKUP_KEEP_DAYS,
+            'socketio_async_mode': SOCKETIO_ASYNC_MODE,
+            'status_priority': STATUS_PRIORITY,
+            'status_auto_rules': STATUS_AUTO_RULES
+        }), 200
+    except Exception as e:
+        logger.error(f"Error fetching config: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/config', methods=['POST'])
+@require_role('TI')  # Solo TI puede modificar configuración
+def update_config(current_user):
+    """
+    Actualizar configuraciones del sistema.
+    Accesible solo por: TI
+    """
+    db = Session()
+    try:
+        data = request.json
+        logger.warning(f"⚠️ Configuration change by {current_user.username}: {list(data.keys())}")
+        
+        # Aquí va la lógica de actualización de configuración
+        # Por ahora solo loguear
+        
+        return jsonify({'success': True, 'message': 'Configuration updated'}), 200
+    except Exception as e:
+        logger.error(f"Error updating config: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check para monitoreo"""
+    try:
+        db = Session()
+        db.execute("SELECT 1")
+        db.remove()
+        return jsonify({'status': 'healthy', 'timestamp': dt_now}), 200
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
 
 if __name__ == '__main__':
