@@ -49,6 +49,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Importar Dashboard de Métricas
+try:
+    from metrics_dashboard import get_dashboard_for_role
+    metrics_available = True
+except:
+    metrics_available = False
+    logger.warning("⚠️ Módulo de métricas no disponible")
+
 # Colores Material Design
 COLOR_PRIMARY = "#0066cc"
 COLOR_SUCCESS = "#2ecc71"
@@ -449,6 +457,19 @@ class CallManagerApp(ctk.CTk):
             width=80
         )
         btn_theme.pack(side='right', padx=8, pady=10)
+        
+        # Botón métricas
+        btn_metrics = ctk.CTkButton(
+            header,
+            text="📊 Métricas",
+            command=self.show_metrics,
+            fg_color=COLOR_SUCCESS,
+            hover_color="#27ae60",
+            font=("Segoe UI", 11, "bold"),
+            height=34,
+            width=100
+        )
+        btn_metrics.pack(side='right', padx=8, pady=10)
         
         # Botón estado
         btn_status = ctk.CTkButton(
@@ -1041,6 +1062,45 @@ class CallManagerApp(ctk.CTk):
             messagebox.showinfo('Estado de la Aplicación', status_msg)
         except Exception as e:
             logger.error(f'Error mostrando estado: {e}')
+    
+    def show_metrics(self):
+        """Mostrar dashboard de métricas según el rol del usuario"""
+        if not metrics_available:
+            messagebox.showwarning(
+                'Métricas no disponibles',
+                'El módulo de métricas no está instalado.'
+            )
+            return
+        
+        try:
+            # Crear ventana modal
+            metrics_window = ctk.CTkToplevel(self)
+            metrics_window.title("📊 Dashboard de Métricas")
+            metrics_window.geometry("1200x800")
+            metrics_window.minsize(900, 600)
+            
+            # Por ahora usar rol de agente por defecto
+            # En una versión futura, esto vendría del servidor de autenticación
+            role = "agent"  # Puede ser: agent, supervisor, projectmanager, teamlead
+            
+            # Crear dashboard
+            dashboard = get_dashboard_for_role(
+                metrics_window,
+                role=role,
+                api_url=SERVER_URL,
+                api_key=API_KEY
+            )
+            dashboard.pack(fill="both", expand=True)
+            
+            logger.info(f"📊 Dashboard de métricas abierto para rol: {role}")
+            
+        except Exception as e:
+            logger.error(f'Error mostrando métricas: {e}')
+            messagebox.showerror(
+                'Error',
+                f'Error al cargar el dashboard de métricas:\n{str(e)}'
+            )
+    
     
     def on_closing(self):
         """Manejar cierre de aplicación"""
