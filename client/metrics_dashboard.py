@@ -11,7 +11,15 @@ import threading
 from datetime import datetime, timedelta
 import json
 from typing import Dict, List, Optional
-from auth_context import current_user
+
+try:
+    from auth_context import current_user
+except ImportError:
+    # Fallback si no está disponible
+    class DummyUser:
+        username = "user"
+        role = "agent"
+    current_user = DummyUser()
 
 # Colores
 COLOR_PRIMARY = "#0066cc"
