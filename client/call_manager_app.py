@@ -13,6 +13,7 @@ import json
 import logging
 import threading
 import requests
+import socketio
 from datetime import datetime
 from pathlib import Path
 
@@ -247,26 +248,118 @@ class ModernSearchBar(ctk.CTkFrame):
         return self.entry.get()
 
 
+class LoadingSpinner(ctk.CTkFrame):
+    """Spinner de carga animado"""
+    
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, fg_color="transparent", **kwargs)
+        
+        self.spinner_chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.current_frame = 0
+        self.is_running = False
+        self.after_id = None
+        
+        self.label = ctk.CTkLabel(
+            self,
+            text="⠋ Cargando...",
+            font=("Segoe UI", 12, "bold"),
+            text_color=COLOR_PRIMARY
+        )
+        self.label.pack(pady=20)
+    
+    def start(self):
+        """Iniciar animación"""
+        self.is_running = True
+        self._animate()
+    
+    def stop(self):
+        """Detener animación"""
+        self.is_running = False
+        if self.after_id:
+            self.after_cancel(self.after_id)
+    
+    def _animate(self):
+        """Animar spinner"""
+        if self.is_running:
+            char = self.spinner_chars[self.current_frame]
+            self.label.configure(text=f"{char} Cargando...")
+            self.current_frame = (self.current_frame + 1) % len(self.spinner_chars)
+            self.after_id = self.after(100, self._animate)
+
+
 class StatusBar(ctk.CTkFrame):
-    """Barra de estado"""
+    """Barra de estado mejorada con indicadores de conexión"""
     
     def __init__(self, parent, **kwargs):
         super().__init__(parent, fg_color=COLOR_CARD, height=40, **kwargs)
         self.pack_propagate(False)
         
-        self.status_label = ctk.CTkLabel(
-            self,
-            text="✅ Conectado | 📞 0 contactos",
+        # Frame para elementos
+        inner = ctk.CTkFrame(self, fg_color="transparent")
+        inner.pack(fill='x', padx=12, pady=10, side='left', expand=True)
+        
+        # Indicador de conexión
+        self.connection_label = ctk.CTkLabel(
+            inner,
+            text="✅ Conectado",
+            font=("Segoe UI", 10),
+            text_color=COLOR_SUCCESS
+        )
+        self.connection_label.pack(side='left', padx=10)
+        
+        # Separador
+        sep1 = ctk.CTkLabel(inner, text="|", font=("Segoe UI", 10), text_color=COLOR_TEXT_SECONDARY)
+        sep1.pack(side='left', padx=5)
+        
+        # Contador de contactos
+        self.contact_label = ctk.CTkLabel(
+            inner,
+            text="📞 0 contactos",
             font=("Segoe UI", 10),
             text_color=COLOR_TEXT_SECONDARY
         )
-        self.status_label.pack(side='left', padx=12, pady=10)
+        self.contact_label.pack(side='left', padx=10)
+        
+        # Separador
+        sep2 = ctk.CTkLabel(inner, text="|", font=("Segoe UI", 10), text_color=COLOR_TEXT_SECONDARY)
+        sep2.pack(side='left', padx=5)
+        
+        # Timestamp
+        self.timestamp_label = ctk.CTkLabel(
+            inner,
+            text="🕐 Ahora",
+            font=("Segoe UI", 10),
+            text_color=COLOR_TEXT_SECONDARY
+        )
+        self.timestamp_label.pack(side='left', padx=10)
+    
+    def set_connected(self, connected):
+        """Actualizar estado de conexión"""
+        if connected:
+            self.connection_label.configure(
+                text="✅ Conectado",
+                text_color=COLOR_SUCCESS
+            )
+        else:
+            self.connection_label.configure(
+                text="❌ Desconectado",
+                text_color=COLOR_DANGER
+            )
+    
+    def set_contact_count(self, count):
+        """Actualizar contador de contactos"""
+        self.contact_label.configure(text=f"📞 {count} contactos")
+    
+    def update_timestamp(self):
+        """Actualizar timestamp"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.timestamp_label.configure(text=f"🕐 {timestamp}")
     
     def update_status(self, connected=True, contact_count=0):
-        status = "✅ Conectado" if connected else "❌ Desconectado"
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        text = f"{status} | 📞 {contact_count} contactos | 🕐 {timestamp}"
-        self.status_label.configure(text=text)
+        """Método compatible con versión anterior"""
+        self.set_connected(connected)
+        self.set_contact_count(contact_count)
+        self.update_timestamp()
 
 
 class CallManagerApp(ctk.CTk):
@@ -298,6 +391,10 @@ class CallManagerApp(ctk.CTk):
                 logger.info("✅ InterPhone inicializado")
             except Exception as e:
                 logger.warning(f"⚠️ InterPhone no disponible: {e}")
+        
+        # Socket.IO
+        self.sio = socketio.Client()
+        self.setup_socket()
         
         logger.info("Inicializando CallManager v2.0...")
         
@@ -351,7 +448,20 @@ class CallManagerApp(ctk.CTk):
             height=34,
             width=80
         )
-        btn_theme.pack(side='right', padx=20, pady=10)
+        btn_theme.pack(side='right', padx=8, pady=10)
+        
+        # Botón estado
+        btn_status = ctk.CTkButton(
+            header,
+            text="ℹ️ Estado",
+            command=self.show_status,
+            fg_color=COLOR_WARNING,
+            hover_color="#d68910",
+            font=("Segoe UI", 11, "bold"),
+            height=34,
+            width=80
+        )
+        btn_status.pack(side='right', padx=8, pady=10)
         
         # ===== TOOLBAR =====
         toolbar = ctk.CTkFrame(main, fg_color=COLOR_CARD, height=50)
@@ -420,6 +530,51 @@ class CallManagerApp(ctk.CTk):
         # ===== STATUS BAR =====
         self.status_bar = StatusBar(main)
         self.status_bar.pack(fill='x', padx=0, pady=0)
+    
+    def setup_socket(self):
+        """Configurar eventos Socket.IO para actualizaciones en tiempo real"""
+        @self.sio.event
+        def connect():
+            logger.info('✅ Conectado a Socket.IO')
+            self.status_bar.set_connected(True)
+            threading.Thread(target=self.load_contacts, daemon=True).start()
+
+        @self.sio.event
+        def disconnect():
+            logger.warning('❌ Desconectado de Socket.IO')
+            self.status_bar.set_connected(False)
+
+        @self.sio.on('contact_updated')
+        def on_contact_updated(data):
+            logger.debug(f"Contacto actualizado: {data.get('id')}")
+            if 'contact' in data:
+                contact = data['contact']
+                self.contacts[contact['id']] = contact
+            self.after(0, self.render_contacts)
+
+        @self.sio.on('contact_deleted')
+        def on_contact_deleted(data):
+            contact_id = data.get('id')
+            logger.debug(f"Contacto borrado: {contact_id}")
+            if contact_id in self.contacts:
+                del self.contacts[contact_id]
+            self.after(0, self.render_contacts)
+
+        # Intentar conectar en thread para no bloquear UI
+        threading.Thread(target=self._connect_socket, daemon=True).start()
+    
+    def _connect_socket(self):
+        """Conectar a Socket.IO en background"""
+        try:
+            logger.info(f"Intentando conectar a {SERVER_URL}")
+            self.sio.connect(
+                SERVER_URL,
+                headers={'X-API-Key': API_KEY},
+                wait_timeout=5
+            )
+        except Exception as e:
+            logger.warning(f"Socket.IO no disponible: {e}")
+            self.after(0, lambda: self.status_bar.set_connected(False))
     
     def load_contacts(self):
         """Cargar contactos desde API o JSON local"""
@@ -510,10 +665,13 @@ class CallManagerApp(ctk.CTk):
         self.status_bar.update_status(True, len(self.filtered_contacts if query else self.contacts))
     
     def call_contact(self, contact):
-        """Hacer llamada a contacto"""
+        """Hacer llamada a contacto con manejo robusto"""
         try:
             phone = contact.get('phone', '')
             name = contact.get('name', 'N/A')
+            contact_id = contact.get('id')
+            
+            logger.info(f"Intentando llamar a: {phone}")
             
             # Intentar usar InterPhone
             if self.interphone_controller:
@@ -526,12 +684,18 @@ class CallManagerApp(ctk.CTk):
                     # Actualizar estado
                     threading.Thread(
                         target=self._update_contact_status,
-                        args=(contact.get('id'), 'EN PROGRESO'),
+                        args=(contact_id, 'EN PROGRESO'),
                         daemon=True
                     ).start()
+                except RuntimeError as re:
+                    logger.warning(f'InterPhone no disponible: {re}')
+                    messagebox.showwarning('InterPhone No Disponible', 
+                                         f'InterPhone no está instalado.\n\n'
+                                         f'Número: {phone}\n\n'
+                                         f'Puedes marcarlo manualmente.')
                 except Exception as e:
-                    logger.error(f"Error con InterPhone: {e}")
-                    messagebox.showinfo('Llamada', f'📞 Llamada a {name} registrada (mock)')
+                    logger.warning(f'Error con InterPhone: {e}')
+                    messagebox.showinfo('Llamada', f'📞 Llamada a {name} registrada')
             else:
                 messagebox.showinfo('Llamada', f'📞 Llamada a {name} ({phone}) registrada')
                 logger.info(f"📞 Mock call a {name}")
@@ -653,7 +817,8 @@ class CallManagerApp(ctk.CTk):
     def delete_contact(self, contact):
         """Borrar contacto con confirmación"""
         try:
-            if messagebox.askyesno("Confirmar", f"¿Borrar a {contact.get('name')}?"):
+            name = contact.get('name', 'Contacto')
+            if messagebox.askyesno("Confirmar", f"¿Borrar a {name}?"):
                 contact_id = contact.get('id')
                 
                 # Intentar borrar de API
@@ -664,24 +829,29 @@ class CallManagerApp(ctk.CTk):
                         timeout=10
                     )
                     
-                    if response.status_code == 200:
+                    if response.status_code in [200, 204]:
                         # Borrar localmente
                         for cid in list(self.contacts.keys()):
                             if self.contacts[cid].get('id') == contact_id:
                                 del self.contacts[cid]
                                 break
                         self.render_contacts()
-                        messagebox.showinfo('Éxito', f'✅ {contact.get("name")} borrado')
-                        logger.info(f"🗑️ Contacto {contact_id} borrado")
-                except:
+                        self.status_bar.set_contact_count(len(self.contacts))
+                        messagebox.showinfo('Éxito', f'✅ {name} borrado')
+                        logger.info(f"🗑️ Contacto {contact_id} borrado desde API")
+                    else:
+                        raise Exception(f"API error: {response.status_code}")
+                except Exception as api_error:
+                    logger.warning(f"No se pudo borrar de API: {api_error}")
                     # Fallback a borrado local
                     for cid in list(self.contacts.keys()):
                         if self.contacts[cid].get('id') == contact_id:
                             del self.contacts[cid]
                             break
                     self.render_contacts()
-                    messagebox.showinfo('Éxito', f'✅ {contact.get("name")} borrado localmente')
-                    logger.info(f"🗑️ Contacto {contact_id} borrado (local)")
+                    self.status_bar.set_contact_count(len(self.contacts))
+                    messagebox.showinfo('Éxito', f'✅ {name} borrado (local)')
+                    logger.info(f"🗑️ Contacto {contact_id} borrado localmente")
         
         except Exception as e:
             logger.error(f'Error borrando contacto: {e}')
@@ -850,9 +1020,37 @@ class CallManagerApp(ctk.CTk):
         ctk.set_appearance_mode(new_mode)
         logger.info(f"🎨 Tema cambiado a {new_mode}")
     
+    def show_status(self):
+        """Mostrar estado detallado de la aplicación"""
+        try:
+            status_msg = f"""
+╔══════════════════════════════════════╗
+║     ESTADO DE LA APLICACIÓN          ║
+╚══════════════════════════════════════╝
+
+📡 Servidor: {SERVER_URL}
+🔌 Socket.IO: {'✅ Conectado' if self.sio.connected else '❌ Desconectado'}
+📱 Contactos: {len(self.contacts)}
+📞 InterPhone: {'✅ Disponible' if self.interphone_controller else '⚠️ No inicializado'}
+
+🔐 Seguridad:
+   API Key: {API_KEY[:20]}...
+   
+📊 Versión: CallManager v2.0
+"""
+            messagebox.showinfo('Estado de la Aplicación', status_msg)
+        except Exception as e:
+            logger.error(f'Error mostrando estado: {e}')
+    
     def on_closing(self):
         """Manejar cierre de aplicación"""
         logger.info("Cerrando CallManager...")
+        try:
+            # Desconectar Socket.IO
+            if self.sio.connected:
+                self.sio.disconnect()
+        except:
+            pass
         self.destroy()
 
 
