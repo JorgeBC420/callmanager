@@ -181,7 +181,28 @@ class UserMetrics(Base):
     calls_failed = Column(Integer, default=0)
     contacts_managed = Column(Integer, default=0)
     avg_call_duration = Column(Integer, default=0)  # en segundos
+    total_talk_time = Column(Integer, default=0)  # Tiempo total hablado en segundos
     last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CallLog(Base):
+    """
+    Registro detallado de cada llamada realizada.
+    Se usa para auditoría, reportes y cálculo de métricas.
+    """
+    __tablename__ = 'call_logs'
+    __table_args__ = {'extend_existing': True}
+    
+    id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False, index=True)
+    contact_id = Column(String, index=True)
+    contact_phone = Column(String)  # Número de teléfono del contacto
+    start_time = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    end_time = Column(DateTime)
+    duration_seconds = Column(Integer, default=0)
+    status = Column(String, default='COMPLETED', index=True)  # COMPLETED, DROPPED, NO_ANSWER, FAILED
+    notes = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 Base.metadata.create_all(engine)
@@ -1300,6 +1321,246 @@ def get_all_metrics(current_user):
         }), 200
     except Exception as e:
         logger.error(f"Error fetching all metrics: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+# ========== ENDPOINTS DE RASTREO DE LLAMADAS ==========
+
+@app.route('/api/calls/start', methods=['POST'])
+@require_role('Agent', 'TeamLead', 'ProjectManager', 'TI')
+def start_call_tracking(current_user):
+    """
+    Registra el inicio de una llamada.
+    
+    Parámetros JSON:
+    - contact_id: ID del contacto (opcional)
+    - contact_phone: Número de teléfono (opcional)
+    
+    Retorna:
+    - call_id: ID único para la sesión de llamada
+    - start_time: Timestamp de inicio
+    """
+    db = Session()
+    try:
+        data = request.json or {}
+        contact_id = data.get('contact_id')
+        contact_phone = data.get('contact_phone', '')
+        
+        # Generar ID único para la llamada
+        call_id = f"call_{int(datetime.utcnow().timestamp() * 1000)}_{current_user.id}"
+        
+        # Crear registro de llamada
+        new_call = CallLog(
+            id=call_id,
+            user_id=current_user.id,
+            contact_id=contact_id,
+            contact_phone=contact_phone,
+            start_time=datetime.utcnow(),
+            status='IN_PROGRESS'
+        )
+        
+        db.add(new_call)
+        db.commit()
+        
+        logger.info(f"📞 Llamada iniciada: {call_id} (Usuario: {current_user.username})")
+        
+        return jsonify({
+            'message': 'Call started',
+            'call_id': call_id,
+            'start_time': new_call.start_time.isoformat()
+        }), 201
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error iniciando rastreo de llamada: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+@app.route('/api/calls/end', methods=['POST'])
+@require_role('Agent', 'TeamLead', 'ProjectManager', 'TI')
+def end_call_tracking(current_user):
+    """
+    Registra el fin de una llamada, calcula duración y actualiza métricas.
+    
+    Parámetros JSON:
+    - call_id: ID de la llamada (requerido)
+    - status: COMPLETED, DROPPED, NO_ANSWER, FAILED (default: COMPLETED)
+    - notes: Notas adicionales (opcional)
+    
+    Retorna:
+    - duration_seconds: Duración en segundos
+    - new_average: Nuevo promedio de duración
+    """
+    db = Session()
+    try:
+        data = request.json or {}
+        call_id = data.get('call_id')
+        status = data.get('status', 'COMPLETED')
+        notes = data.get('notes', '')
+        
+        if not call_id:
+            return jsonify({'error': 'call_id is required'}), 400
+        
+        # Buscar la llamada
+        call_log = db.query(CallLog).filter_by(id=call_id).first()
+        if not call_log:
+            return jsonify({'error': 'Call not found'}), 404
+        
+        # Registrar fin de llamada
+        end_time = datetime.utcnow()
+        call_log.end_time = end_time
+        call_log.status = status
+        call_log.notes = notes
+        
+        # Calcular duración en segundos
+        duration = (end_time - call_log.start_time).total_seconds()
+        call_log.duration_seconds = int(duration)
+        
+        # Obtener o crear métricas del usuario
+        metrics = db.query(UserMetrics).filter_by(user_id=call_log.user_id).first()
+        
+        if not metrics:
+            metrics = UserMetrics(
+                id=f"m_{call_log.user_id}",
+                user_id=call_log.user_id,
+                calls_made=0,
+                calls_success=0,
+                calls_failed=0,
+                total_talk_time=0,
+                avg_call_duration=0
+            )
+            db.add(metrics)
+        
+        # Actualizar contadores
+        metrics.calls_made += 1
+        
+        if status == 'COMPLETED':
+            metrics.calls_success += 1
+        else:
+            metrics.calls_failed += 1
+        
+        # Acumular tiempo total
+        metrics.total_talk_time += int(duration)
+        
+        # RECALCULAR PROMEDIO
+        if metrics.calls_made > 0:
+            metrics.avg_call_duration = metrics.total_talk_time // metrics.calls_made
+        
+        # Guardar cambios
+        db.add(call_log)
+        db.commit()
+        
+        logger.info(f"✅ Llamada finalizada: {call_id} | Duración: {int(duration)}s | Estado: {status}")
+        
+        # Emitir evento SocketIO para actualizar dashboards en vivo
+        try:
+            socketio.emit('call_ended', {
+                'user_id': call_log.user_id,
+                'call_id': call_id,
+                'duration_seconds': int(duration),
+                'status': status,
+                'calls_made': metrics.calls_made,
+                'avg_duration': metrics.avg_call_duration,
+                'total_talk_time': metrics.total_talk_time
+            }, skip_sid=request.sid, broadcast=True)
+        except:
+            pass  # No es crítico si SocketIO falla
+        
+        return jsonify({
+            'message': 'Call ended',
+            'call_id': call_id,
+            'duration_seconds': int(duration),
+            'new_average': metrics.avg_call_duration,
+            'calls_made': metrics.calls_made,
+            'calls_success': metrics.calls_success,
+            'total_talk_time': metrics.total_talk_time
+        }), 200
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error finalizando rastreo de llamada: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+@app.route('/api/calls/log', methods=['GET'])
+@require_role('TeamLead', 'ProjectManager', 'TI')
+def get_call_logs(current_user):
+    """
+    Obtener historial de llamadas (con filtros).
+    
+    Parámetros query:
+    - user_id: Filtrar por usuario (opcional, requerido para no-admin)
+    - start_date: Fecha inicio (YYYY-MM-DD)
+    - end_date: Fecha fin (YYYY-MM-DD)
+    - status: Filtrar por estado
+    - limit: Máximo de registros (default: 100)
+    
+    Retorna:
+    - Lista de llamadas con duración, estado, usuario, contacto
+    """
+    db = Session()
+    try:
+        limit = request.args.get('limit', 100, type=int)
+        limit = min(limit, 1000)  # Máximo 1000 registros
+        
+        # Filtro base
+        query = db.query(CallLog)
+        
+        # Control de acceso
+        if current_user.role not in ['ProjectManager', 'TI']:
+            # TeamLead solo ve su equipo
+            team_users = db.query(User).filter_by(team_id=current_user.team_id).all()
+            user_ids = [u.id for u in team_users]
+            query = query.filter(CallLog.user_id.in_(user_ids))
+        
+        # Filtros opcionales
+        user_id = request.args.get('user_id')
+        if user_id:
+            query = query.filter_by(user_id=user_id)
+        
+        status = request.args.get('status')
+        if status:
+            query = query.filter_by(status=status)
+        
+        start_date = request.args.get('start_date')
+        if start_date:
+            try:
+                start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                query = query.filter(CallLog.start_time >= start_dt)
+            except:
+                pass
+        
+        end_date = request.args.get('end_date')
+        if end_date:
+            try:
+                end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                end_dt = end_dt.replace(hour=23, minute=59, second=59)
+                query = query.filter(CallLog.start_time <= end_dt)
+            except:
+                pass
+        
+        # Ordenar por fecha descendente y limitar
+        calls = query.order_by(CallLog.start_time.desc()).limit(limit).all()
+        
+        result = [{
+            'call_id': call.id,
+            'user_id': call.user_id,
+            'contact_id': call.contact_id,
+            'contact_phone': call.contact_phone,
+            'start_time': call.start_time.isoformat() if call.start_time else None,
+            'end_time': call.end_time.isoformat() if call.end_time else None,
+            'duration_seconds': call.duration_seconds,
+            'status': call.status,
+            'notes': call.notes
+        } for call in calls]
+        
+        return jsonify(result), 200
+    except Exception as e:
+        logger.error(f"Error fetching call logs: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         db.remove()

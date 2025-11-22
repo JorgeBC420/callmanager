@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CallManager v1.0.1.2 - Dashboard Móvil</title>
+    
+    <!-- Bootstrap 5.3 -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- Font Awesome para iconos -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    
+    <!-- Socket.IO -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.0/socket.io.min.js"></script>
+    
+    <style>
+        :root {
+            --primary-color: #0066cc;
+            --success-color: #28a745;
+            --danger-color: #dc3545;
+            --warning-color: #ffc107;
+            --info-color: #17a2b8;
+            --dark-color: #343a40;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+            padding-top: 60px;
+        }
+        
+        /* Navbar */
+        .navbar {
+            background-color: var(--dark-color) !important;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+            position: fixed;
+            top: 0;
+            width: 100%;
+            z-index: 1000;
+        }
+        
+        .navbar-brand {
+            font-weight: bold;
+            font-size: 1.3rem;
+            color: #fff !important;
+        }
+        
+        .navbar-brand i {
+            margin-right: 8px;
+            color: var(--primary-color);
+        }
+        
+        /* Cards */
+        .metric-card {
+            background: linear-gradient(135deg, rgba(0, 102, 204, 0.1) 0%, rgba(0, 102, 204, 0.05) 100%);
+            border: 1px solid rgba(0, 102, 204, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 15px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        
+        .metric-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0, 102, 204, 0.2);
+            border-color: var(--primary-color);
+        }
+        
+        .metric-card h6 {
+            color: #aaa;
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+        
+        .metric-card .value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: var(--primary-color);
+        }
+        
+        .metric-card.success { --primary-color: var(--success-color); }
+        .metric-card.danger { --primary-color: var(--danger-color); }
+        .metric-card.warning { --primary-color: var(--warning-color); }
+        .metric-card.info { --primary-color: var(--info-color); }
+        
+        /* Chart Container */
+        .chart-container {
+            position: relative;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 15px 0;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        /* Status indicator */
+        .status-badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+        
+        .status-badge.active {
+            background-color: rgba(40, 167, 69, 0.2);
+            color: #28a745;
+            border: 1px solid #28a745;
+        }
+        
+        .status-badge.inactive {
+            background-color: rgba(220, 53, 69, 0.2);
+            color: #dc3545;
+            border: 1px solid #dc3545;
+        }
+        
+        /* Tabs */
+        .nav-tabs {
+            border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .nav-tabs .nav-link {
+            color: #aaa;
+            border: none;
+            border-bottom: 3px solid transparent;
+            padding: 12px 20px;
+            transition: all 0.3s ease;
+        }
+        
+        .nav-tabs .nav-link:hover {
+            color: #fff;
+            border-bottom-color: rgba(0, 102, 204, 0.3);
+        }
+        
+        .nav-tabs .nav-link.active {
+            color: var(--primary-color);
+            border-bottom-color: var(--primary-color);
+            background-color: transparent;
+        }
+        
+        /* Table */
+        .table {
+            color: #fff;
+            border-color: rgba(255, 255, 255, 0.1);
+        }
+        
+        .table thead th {
+            border-color: rgba(255, 255, 255, 0.1);
+            color: var(--primary-color);
+            font-weight: bold;
+            text-transform: uppercase;
+            font-size: 0.85rem;
+            letter-spacing: 0.5px;
+        }
+        
+        .table tbody td {
+            border-color: rgba(255, 255, 255, 0.05);
+            vertical-align: middle;
+        }
+        
+        .table tbody tr:hover {
+            background-color: rgba(0, 102, 204, 0.1);
+        }
+        
+        /* Loading spinner */
+        .spinner-border-sm {
+            width: 1rem;
+            height: 1rem;
+            border-width: 0.2em;
+        }
+        
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .metric-card .value {
+                font-size: 1.5rem;
+            }
+            
+            .container {
+                padding: 10px;
+            }
+        }
+        
+        /* Alert styles */
+        .alert {
+            border: none;
+            border-radius: 8px;
+            border-left: 4px solid;
+        }
+        
+        .alert-info {
+            background-color: rgba(23, 162, 184, 0.1);
+            border-left-color: #17a2b8;
+            color: #fff;
+        }
+        
+        .alert-warning {
+            background-color: rgba(255, 193, 7, 0.1);
+            border-left-color: #ffc107;
+            color: #fff;
+        }
+        
+        /* Footer */
+        footer {
+            background-color: var(--dark-color);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            margin-top: 40px;
+            text-align: center;
+            color: #aaa;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <!-- Navbar -->
+    <nav class="navbar navbar-dark">
+        <div class="container-fluid">
+            <span class="navbar-brand">
+                <i class="fas fa-phone-alt"></i>
+                CallManager v1.0.1.2
+            </span>
+            <div class="d-flex align-items-center">
+                <span class="status-badge active me-3">
+                    <i class="fas fa-circle"></i> En Línea
+                </span>
+                <button class="btn btn-sm btn-outline-light">
+                    <i class="fas fa-user"></i>
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="container-fluid mt-4">
+        
+        <!-- Resumen de Métricas -->
+        <div class="row">
+            <div class="col-12 col-md-6 col-lg-3">
+                <div class="metric-card success">
+                    <h6><i class="fas fa-phone"></i> Llamadas Hoy</h6>
+                    <div class="value" id="calls-today">0</div>
+                    <small class="text-muted">Meta: 50</small>
+                </div>
+            </div>
+            
+            <div class="col-12 col-md-6 col-lg-3">
+                <div class="metric-card success">
+                    <h6><i class="fas fa-check-circle"></i> Ventas</h6>
+                    <div class="value" id="sales-today">0</div>
+                    <small class="text-muted">TCV: $0</small>
+                </div>
+            </div>
+            
+            <div class="col-12 col-md-6 col-lg-3">
+                <div class="metric-card info">
+                    <h6><i class="fas fa-tachometer-alt"></i> Tasa de Éxito</h6>
+                    <div class="value" id="success-rate">0%</div>
+                    <small class="text-muted">Promedio: 35%</small>
+                </div>
+            </div>
+            
+            <div class="col-12 col-md-6 col-lg-3">
+                <div class="metric-card warning">
+                    <h6><i class="fas fa-clock"></i> Tiempo Total</h6>
+                    <div class="value" id="total-time">0h</div>
+                    <small class="text-muted">Promedio: 4m 32s</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Alertas y notificaciones -->
+        <div class="row mt-4">
+            <div class="col-12">
+                <div id="alerts-container"></div>
+            </div>
+        </div>
+
+        <!-- Tabs de vistas -->
+        <div class="row mt-4">
+            <div class="col-12">
+                <ul class="nav nav-tabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active" id="dashboard-tab" data-bs-toggle="tab" data-bs-target="#dashboard" type="button" role="tab">
+                            <i class="fas fa-chart-line"></i> Dashboard
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="team-tab" data-bs-toggle="tab" data-bs-target="#team" type="button" role="tab">
+                            <i class="fas fa-users"></i> Mi Equipo
+                        </button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link" id="recordings-tab" data-bs-toggle="tab" data-bs-target="#recordings" type="button" role="tab">
+                            <i class="fas fa-microphone"></i> Grabaciones
+                        </button>
+                    </li>
+                </ul>
+
+                <div class="tab-content mt-3">
+                    <!-- Dashboard Tab -->
+                    <div class="tab-pane fade show active" id="dashboard" role="tabpanel">
+                        <div class="row">
+                            <div class="col-12">
+                                <div class="chart-container">
+                                    <h6 class="text-muted mb-3">📊 Estado de Llamadas (Últimas 24h)</h6>
+                                    <canvas id="calls-chart" height="80"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="row mt-3">
+                            <div class="col-12">
+                                <div class="chart-container">
+                                    <h6 class="text-muted mb-3">📈 Tendencia Semanal</h6>
+                                    <canvas id="trend-chart" height="80"></canvas>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Team Tab -->
+                    <div class="tab-pane fade" id="team" role="tabpanel">
+                        <div class="alert alert-info">
+                            <i class="fas fa-info-circle"></i> Desempeño de tu equipo
+                        </div>
+                        
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Agente</th>
+                                        <th>Llamadas</th>
+                                        <th>Ventas</th>
+                                        <th>% Éxito</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="team-table-body">
+                                    <tr>
+                                        <td colspan="4" class="text-center text-muted py-4">
+                                            <i class="fas fa-spinner fa-spin"></i> Cargando...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Recordings Tab -->
+                    <div class="tab-pane fade" id="recordings" role="tabpanel">
+                        <div class="alert alert-info">
+                            <i class="fas fa-microphone"></i> Tus grabaciones de llamadas
+                        </div>
+                        
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Contacto</th>
+                                        <th>Fecha</th>
+                                        <th>Duración</th>
+                                        <th>Tamaño</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="recordings-table-body">
+                                    <tr>
+                                        <td colspan="5" class="text-center text-muted py-4">
+                                            <i class="fas fa-spinner fa-spin"></i> Cargando grabaciones...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- Footer -->
+    <footer>
+        <p>CallManager v1.0.1.2 | Dashboard Móvil | © 2025 Todos los derechos reservados</p>
+        <small>Última actualización: <span id="last-update">--:--</span></small>
+    </footer>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Chart.js para gráficos -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+
+    <script>
+        // Socket.IO Connection
+        const socket = io({
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            reconnectionAttempts: 5
+        });
+
+        // Gráficos globales
+        let callsChart = null;
+        let trendChart = null;
+
+        // Conexión establecida
+        socket.on('connect', () => {
+            console.log('✅ Conectado al servidor');
+            showAlert('success', '✅ Conectado al servidor');
+        });
+
+        // Desconexión
+        socket.on('disconnect', () => {
+            console.log('❌ Desconectado del servidor');
+            showAlert('warning', '⚠️ Conexión perdida. Reintentando...');
+        });
+
+        // Actualización de métricas en tiempo real
+        socket.on('metrics_update', (data) => {
+            console.log('📊 Métricas actualizadas:', data);
+            
+            document.getElementById('calls-today').textContent = data.calls_today || 0;
+            document.getElementById('sales-today').textContent = data.sales_today || 0;
+            document.getElementById('success-rate').textContent = (data.success_rate || 0) + '%';
+            
+            const hours = Math.floor((data.total_talk_time || 0) / 3600);
+            const minutes = Math.floor(((data.total_talk_time || 0) % 3600) / 60);
+            document.getElementById('total-time').textContent = `${hours}h ${minutes}m`;
+            
+            updateLastUpdate();
+        });
+
+        // Actualización de tabla del equipo
+        socket.on('team_update', (data) => {
+            console.log('👥 Equipo actualizado:', data);
+            updateTeamTable(data);
+        });
+
+        // Actualización de grabaciones
+        socket.on('recordings_update', (data) => {
+            console.log('🎙️ Grabaciones actualizadas:', data);
+            updateRecordingsTable(data);
+        });
+
+        // Actualización de gráficos
+        socket.on('charts_update', (data) => {
+            console.log('📈 Gráficos actualizados:', data);
+            updateCharts(data);
+        });
+
+        // Función para mostrar alertas
+        function showAlert(type, message) {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert alert-${type} alert-dismissible fade show`;
+            alertDiv.innerHTML = `
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+            
+            const container = document.getElementById('alerts-container');
+            container.appendChild(alertDiv);
+            
+            // Auto-dismiss después de 5 segundos
+            setTimeout(() => {
+                alertDiv.remove();
+            }, 5000);
+        }
+
+        // Actualizar tabla del equipo
+        function updateTeamTable(teamData) {
+            const tbody = document.getElementById('team-table-body');
+            
+            if (!teamData || teamData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No hay datos</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = teamData.map(agent => `
+                <tr>
+                    <td><strong>${agent.name}</strong></td>
+                    <td>${agent.calls || 0}</td>
+                    <td>${agent.sales || 0}</td>
+                    <td>
+                        <span class="badge bg-success">${agent.success_rate || 0}%</span>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // Actualizar tabla de grabaciones
+        function updateRecordingsTable(recordingsData) {
+            const tbody = document.getElementById('recordings-table-body');
+            
+            if (!recordingsData || recordingsData.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No hay grabaciones</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = recordingsData.map(rec => `
+                <tr>
+                    <td>${rec.contact_name}</td>
+                    <td>${new Date(rec.start_time).toLocaleString('es-ES')}</td>
+                    <td>${rec.duration_seconds}s</td>
+                    <td>${(rec.file_size_bytes / 1024 / 1024).toFixed(2)} MB</td>
+                    <td>
+                        <a href="#" class="btn btn-sm btn-info">
+                            <i class="fas fa-download"></i>
+                        </a>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // Actualizar gráficos
+        function updateCharts(chartsData) {
+            // Gráfico de estado de llamadas
+            if (callsChart) {
+                callsChart.data.labels = chartsData.call_status_labels || [];
+                callsChart.data.datasets[0].data = chartsData.call_status_data || [];
+                callsChart.update();
+            }
+            
+            // Gráfico de tendencia
+            if (trendChart) {
+                trendChart.data.labels = chartsData.trend_labels || [];
+                trendChart.data.datasets[0].data = chartsData.trend_data || [];
+                trendChart.update();
+            }
+        }
+
+        // Actualizar última actualización
+        function updateLastUpdate() {
+            const now = new Date();
+            document.getElementById('last-update').textContent = now.toLocaleTimeString('es-ES');
+        }
+
+        // Inicializar gráficos
+        function initCharts() {
+            const callsCtx = document.getElementById('calls-chart').getContext('2d');
+            callsChart = new Chart(callsCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Completadas', 'Fallidas', 'Sin respuesta'],
+                    datasets: [{
+                        data: [0, 0, 0],
+                        backgroundColor: ['#28a745', '#dc3545', '#ffc107'],
+                        borderColor: ['#20c997', '#e74c3c', '#f39c12'],
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#fff' }
+                        }
+                    }
+                }
+            });
+
+            const trendCtx = document.getElementById('trend-chart').getContext('2d');
+            trendChart = new Chart(trendCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Llamadas',
+                        data: [],
+                        borderColor: '#0066cc',
+                        backgroundColor: 'rgba(0, 102, 204, 0.1)',
+                        borderWidth: 2,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#fff' }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            ticks: { color: '#fff' },
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' }
+                        },
+                        x: {
+                            ticks: { color: '#fff' },
+                            grid: { color: 'rgba(255, 255, 255, 0.1)' }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Inicialización
+        document.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+            updateLastUpdate();
+            
+            // Solicitar datos iniciales
+            socket.emit('request_metrics');
+            socket.emit('request_team_data');
+            socket.emit('request_recordings');
+        });
+
+        // Auto-refresh cada 30 segundos
+        setInterval(() => {
+            socket.emit('request_metrics');
+        }, 30000);
+    </script>
+</body>
+</html>

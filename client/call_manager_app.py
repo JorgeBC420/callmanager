@@ -42,6 +42,27 @@ try:
 except:
     interphone_available = False
 
+# Importar Sistema de Proveedores de Llamadas
+try:
+    from call_providers import call_provider_manager
+    providers_available = True
+except:
+    providers_available = False
+
+# Importar Sistema de Rastreo de Llamadas
+try:
+    from call_tracking import initialize_tracker, get_tracker, CallTracker
+    tracking_available = True
+except:
+    tracking_available = False
+
+# Importar Dashboard de Métricas
+try:
+    from ui.metrics_dashboard import MetricsDashboard
+    metrics_dashboard_available = True
+except:
+    metrics_dashboard_available = False
+
 # Configuración de logging
 logging.basicConfig(
     level=logging.INFO,
@@ -49,13 +70,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Importar Dashboard de Métricas
-try:
-    from metrics_dashboard import get_dashboard_for_role
-    metrics_available = True
-except:
-    metrics_available = False
-    logger.warning("⚠️ Módulo de métricas no disponible")
+# Log de proveedores
+if not providers_available:
+    logger.warning("⚠️ Sistema de proveedores de llamadas no disponible")
+
+# Importar Dashboard de Métricas (ya hecho arriba)
+# El intento de importar get_dashboard_for_role antiguo se reemplaza por MetricsDashboard
 
 # Colores Material Design
 COLOR_PRIMARY = "#0066cc"
@@ -386,6 +406,11 @@ class CallManagerApp(ctk.CTk):
             'X-API-Key': API_KEY
         }
         
+        # Datos de usuario (se llenan al login)
+        self.current_user_id = 'agent_001'  # ID por defecto
+        self.current_username = 'Agent'      # Nombre por defecto
+        self.current_user_role = 'agent'     # Rol por defecto
+        
         # Datos
         self.contacts = {}
         self.filtered_contacts = []
@@ -399,6 +424,21 @@ class CallManagerApp(ctk.CTk):
                 logger.info("✅ InterPhone inicializado")
             except Exception as e:
                 logger.warning(f"⚠️ InterPhone no disponible: {e}")
+        
+        # Call Tracking
+        self.call_tracker = None
+        if tracking_available:
+            try:
+                self.call_tracker = initialize_tracker(SERVER_URL, API_KEY)
+                # Registrar callback para actualizar timer en UI
+                self.call_tracker.set_timer_callback(self._on_timer_update)
+                logger.info("✅ Call Tracker inicializado")
+            except Exception as e:
+                logger.warning(f"⚠️ Call Tracker no disponible: {e}")
+        
+        # Variables de timer
+        self.timer_running = False
+        self.lbl_timer = None
         
         # Socket.IO
         self.sio = socketio.Client()
@@ -444,6 +484,15 @@ class CallManagerApp(ctk.CTk):
             text_color=COLOR_TEXT_SECONDARY
         )
         subtitle.pack(side='left', padx=0, pady=10)
+        
+        # TIMER DE LLAMADA (mostrará tiempo en curso)
+        self.lbl_timer = ctk.CTkLabel(
+            header,
+            text="00:00",
+            font=("Consolas", 16, "bold"),
+            text_color="#888888"
+        )
+        self.lbl_timer.pack(side='right', padx=15, pady=10)
         
         # Botón tema
         btn_theme = ctk.CTkButton(
@@ -532,6 +581,19 @@ class CallManagerApp(ctk.CTk):
             height=34
         )
         btn_refrescar.pack(side='left', padx=6, pady=8)
+        
+        # Botón de proveedores
+        if providers_available:
+            btn_providers = ctk.CTkButton(
+                toolbar,
+                text="☎️ Proveedor",
+                command=self.show_provider_menu,
+                fg_color="#9b59b6",
+                hover_color="#8e44ad",
+                font=("Segoe UI", 11, "bold"),
+                height=34
+            )
+            btn_providers.pack(side='left', padx=6, pady=8)
         
         # ===== BÚSQUEDA =====
         self.search_bar = ModernSearchBar(main, on_search=self.filter_contacts)
@@ -685,8 +747,114 @@ class CallManagerApp(ctk.CTk):
         self.render_contacts()
         self.status_bar.update_status(True, len(self.filtered_contacts if query else self.contacts))
     
+    def show_provider_menu(self):
+        """Muestra menú de selección de proveedor de llamadas"""
+        if not providers_available:
+            messagebox.showwarning('Proveedores No Disponibles', 
+                                 'El sistema de proveedores no está disponible')
+            return
+        
+        try:
+            # Crear ventana
+            provider_window = ctk.CTkToplevel(self)
+            provider_window.title("☎️ Seleccionar Proveedor de Llamadas")
+            provider_window.geometry('400x400')
+            provider_window.resizable(False, False)
+            provider_window.transient(self)
+            provider_window.grab_set()
+            
+            # Frame principal
+            main_frame = ctk.CTkFrame(provider_window, fg_color=COLOR_BG)
+            main_frame.pack(fill='both', expand=True, padx=20, pady=20)
+            
+            # Título
+            title = ctk.CTkLabel(
+                main_frame,
+                text="Proveedores Disponibles",
+                font=("Segoe UI", 14, "bold"),
+                text_color=COLOR_TEXT
+            )
+            title.pack(pady=(0, 15))
+            
+            # Obtener proveedores disponibles
+            available = call_provider_manager.get_available_providers()
+            current = call_provider_manager.default_provider
+            
+            if not available:
+                label = ctk.CTkLabel(
+                    main_frame,
+                    text="No hay proveedores disponibles",
+                    text_color=COLOR_DANGER
+                )
+                label.pack(pady=10)
+            
+            # Crear botones para cada proveedor
+            for provider_info in available:
+                name = provider_info['name']
+                info = provider_info['info']
+                
+                # Determinar color según disponibilidad
+                is_default = name == current
+                btn_color = COLOR_SUCCESS if is_default else COLOR_INFO
+                
+                btn_text = f"✓ {info['name']}" if is_default else f"  {info['name']}"
+                
+                def make_callback(prov_name):
+                    return lambda: self._set_provider(prov_name, provider_window)
+                
+                btn = ctk.CTkButton(
+                    main_frame,
+                    text=btn_text,
+                    command=make_callback(name),
+                    fg_color=btn_color,
+                    hover_color=btn_color,
+                    font=("Segoe UI", 11),
+                    height=40
+                )
+                btn.pack(fill='x', pady=8)
+                
+                # Información
+                info_text = f"v{info['version']}"
+                info_label = ctk.CTkLabel(
+                    main_frame,
+                    text=info_text,
+                    text_color=COLOR_TEXT_SECONDARY,
+                    font=("Segoe UI", 9)
+                )
+                info_label.pack(anchor='w', padx=10)
+            
+            # Botón cerrar
+            close_btn = ctk.CTkButton(
+                main_frame,
+                text="Cerrar",
+                command=provider_window.destroy,
+                fg_color=COLOR_CARD,
+                hover_color=COLOR_PRIMARY,
+                font=("Segoe UI", 11)
+            )
+            close_btn.pack(fill='x', pady=(15, 0))
+            
+        except Exception as e:
+            logger.error(f"Error en menú de proveedores: {e}")
+            messagebox.showerror('Error', f'Error: {e}')
+    
+    def _set_provider(self, provider_name: str, window):
+        """Establece el proveedor de llamadas"""
+        try:
+            if call_provider_manager.set_default_provider(provider_name):
+                messagebox.showinfo('Éxito', 
+                                  f'Proveedor cambiado a: {provider_name}')
+                logger.info(f"✅ Proveedor de llamadas: {provider_name}")
+                window.destroy()
+            else:
+                messagebox.showwarning('Error', 
+                                     f'No se pudo cambiar a: {provider_name}')
+        except Exception as e:
+            logger.error(f"Error cambiando proveedor: {e}")
+            messagebox.showerror('Error', f'Error: {e}')
+    
     def call_contact(self, contact):
-        """Hacer llamada a contacto con manejo robusto"""
+        """Hacer llamada a contacto con rastreo de tiempo"""
         try:
             phone = contact.get('phone', '')
             name = contact.get('name', 'N/A')
@@ -694,8 +862,33 @@ class CallManagerApp(ctk.CTk):
             
             logger.info(f"Intentando llamar a: {phone}")
             
-            # Intentar usar InterPhone
-            if self.interphone_controller:
+            # INICIAR RASTREO DE LLAMADA EN SERVIDOR
+            if self.call_tracker:
+                try:
+                    call_id = self.call_tracker.start_call(contact_id, phone)
+                    if not call_id:
+                        logger.warning("No se pudo iniciar rastreo de llamada")
+                except Exception as e:
+                    logger.error(f"Error iniciando rastreo: {e}")
+            
+            # Usar sistema de proveedores si está disponible
+            if providers_available:
+                success, message = call_provider_manager.make_call(phone)
+                if success:
+                    messagebox.showinfo('Llamada', f'📞 {message} ✅')
+                    logger.info(f"📞 Llamada iniciada a {name} ({phone})")
+                    
+                    # Actualizar estado
+                    threading.Thread(
+                        target=self._update_contact_status,
+                        args=(contact_id, 'EN PROGRESO'),
+                        daemon=True
+                    ).start()
+                else:
+                    logger.warning(f'Error en llamada: {message}')
+                    messagebox.showwarning('Error en Llamada', message)
+            # Fallback a InterPhone si proveedores no disponibles
+            elif self.interphone_controller:
                 try:
                     normalized = normalize_phone_for_interphone(phone)
                     self.interphone_controller.call(normalized)
@@ -1065,7 +1258,7 @@ class CallManagerApp(ctk.CTk):
     
     def show_metrics(self):
         """Mostrar dashboard de métricas según el rol del usuario"""
-        if not metrics_available:
+        if not metrics_dashboard_available:
             messagebox.showwarning(
                 'Métricas no disponibles',
                 'El módulo de métricas no está instalado.'
@@ -1073,33 +1266,83 @@ class CallManagerApp(ctk.CTk):
             return
         
         try:
-            # Crear ventana modal
-            metrics_window = ctk.CTkToplevel(self)
-            metrics_window.title("📊 Dashboard de Métricas")
-            metrics_window.geometry("1200x800")
-            metrics_window.minsize(900, 600)
-            
-            # Por ahora usar rol de agente por defecto
-            # En una versión futura, esto vendría del servidor de autenticación
-            role = "agent"  # Puede ser: agent, supervisor, projectmanager, teamlead
-            
-            # Crear dashboard
-            dashboard = get_dashboard_for_role(
-                metrics_window,
-                role=role,
-                api_url=SERVER_URL,
-                api_key=API_KEY
+            # Crear y mostrar dashboard
+            MetricsDashboard(
+                self,
+                base_url=SERVER_URL,
+                api_key=API_KEY,
+                user_id=self.current_user_id,
+                user_role=self.current_user_role,
+                username=self.current_username
             )
-            dashboard.pack(fill="both", expand=True)
-            
-            logger.info(f"📊 Dashboard de métricas abierto para rol: {role}")
-            
+            logger.info(f"📊 Dashboard de métricas abierto para: {self.current_username}")
         except Exception as e:
             logger.error(f'Error mostrando métricas: {e}')
             messagebox.showerror(
                 'Error',
-                f'Error al cargar el dashboard de métricas:\n{str(e)}'
+                f'Error al cargar el dashboard:\n{str(e)}'
             )
+    
+    def _on_timer_update(self, duration_seconds: int, formatted_time: str):
+        """Callback para actualizar el timer en UI cuando hay una llamada activa"""
+        try:
+            if self.lbl_timer:
+                # Cambiar color según duración
+                if duration_seconds > 300:  # > 5 minutos
+                    color = "#e74c3c"  # Rojo
+                elif duration_seconds > 120:  # > 2 minutos
+                    color = "#f39c12"  # Amarillo
+                else:
+                    color = "#2ecc71"  # Verde
+                
+                self.lbl_timer.configure(text=formatted_time, text_color=color)
+        except Exception as e:
+            logger.debug(f"Error actualizando timer UI: {e}")
+    
+    def end_current_call(self, status: str = 'COMPLETED'):
+        """Finalizar la llamada activa y reportar duración al servidor"""
+        if not self.call_tracker:
+            logger.warning("Call Tracker no disponible")
+            return
+        
+        try:
+            # Finalizar en servidor
+            metrics = self.call_tracker.end_call(status)
+            
+            if metrics:
+                duration = metrics.get('duration_seconds', 0)
+                new_avg = metrics.get('new_average', 0)
+                
+                # Mostrar resumen
+                message = f"""
+✅ Llamada Finalizada
+
+Duración: {self._format_seconds(duration)}
+Nuevo Promedio: {self._format_seconds(new_avg)}
+Total Llamadas: {metrics.get('calls_made', 0)}
+                """
+                messagebox.showinfo("Llamada Completada", message)
+                logger.info(f"✅ Llamada completada - Duración: {duration}s")
+            
+            # Resetear timer en UI
+            if self.lbl_timer:
+                self.lbl_timer.configure(text="00:00", text_color="#888888")
+        
+        except Exception as e:
+            logger.error(f"Error finalizando llamada: {e}")
+    
+    @staticmethod
+    def _format_seconds(seconds: int) -> str:
+        """Formatear segundos a MM:SS o HH:MM:SS"""
+        if seconds < 0:
+            return "00:00"
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
+        
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        return f"{minutes:02d}:{secs:02d}"
     
     
     def on_closing(self):
