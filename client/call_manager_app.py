@@ -2,17 +2,44 @@
 # -*- coding: utf-8 -*-
 """
 CallManager v2.0 - Versión Corregida
-Material Design Dark Theme con CustomTkinter
+Material Design Dark Theme con CustomTkinter + API Backend
 """
 
 import customtkinter as ctk
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, simpledialog
 import os
 import sys
 import json
 import logging
+import threading
+import requests
 from datetime import datetime
 from pathlib import Path
+
+# Agregar directorios al path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+ui_dir = os.path.join(current_dir, 'ui')
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+if ui_dir not in sys.path:
+    sys.path.insert(0, ui_dir)
+
+# Importar desde config
+try:
+    from config_loader import load_config
+    CONFIG = load_config()
+    SERVER_URL = CONFIG.get('SERVER_URL', 'http://localhost:5000')
+    API_KEY = CONFIG.get('API_KEY', 'dev-key-change-in-production')
+except:
+    SERVER_URL = 'http://localhost:5000'
+    API_KEY = 'dev-key-change-in-production'
+
+# Importar InterPhone
+try:
+    from interphone_controller import InterPhoneController, normalize_phone_for_interphone
+    interphone_available = True
+except:
+    interphone_available = False
 
 # Configuración de logging
 logging.basicConfig(
@@ -38,7 +65,7 @@ ctk.set_default_color_theme("blue")
 
 
 class ModernContactCard(ctk.CTkFrame):
-    """Tarjeta de contacto moderna"""
+    """Tarjeta de contacto moderna con estado"""
     
     def __init__(self, parent, contact, on_call=None, on_edit=None, on_delete=None, **kwargs):
         super().__init__(parent, fg_color=COLOR_CARD, corner_radius=8, **kwargs)
@@ -52,14 +79,31 @@ class ModernContactCard(ctk.CTkFrame):
         main = ctk.CTkFrame(self, fg_color="transparent")
         main.pack(fill='x', padx=12, pady=12)
         
+        # Sección superior: Nombre + Estado
+        header = ctk.CTkFrame(main, fg_color="transparent")
+        header.pack(fill='x', pady=(0, 8))
+        
         # Nombre
         name = ctk.CTkLabel(
-            main,
+            header,
             text=contact.get('name', 'Sin nombre'),
             font=("Segoe UI", 13, "bold"),
             text_color=COLOR_TEXT
         )
-        name.pack(anchor='w', pady=(0, 4))
+        name.pack(anchor='w', side='left')
+        
+        # Estado de llamada
+        status = contact.get('status', 'SIN GESTIONAR')
+        status_icon = self._get_status_icon(status)
+        status_color = self._get_status_color(status)
+        
+        status_label = ctk.CTkLabel(
+            header,
+            text=f"{status_icon} {status}",
+            font=("Segoe UI", 10),
+            text_color=status_color
+        )
+        status_label.pack(anchor='e', side='right')
         
         # Teléfono
         phone = ctk.CTkLabel(
@@ -68,7 +112,18 @@ class ModernContactCard(ctk.CTkFrame):
             font=("Segoe UI", 11),
             text_color=COLOR_TEXT_SECONDARY
         )
-        phone.pack(anchor='w', pady=(0, 8))
+        phone.pack(anchor='w', pady=(0, 4))
+        
+        # Notas si existen
+        if contact.get('notes'):
+            notes = ctk.CTkLabel(
+                main,
+                text=f"📝 {contact.get('notes', '')[:60]}...",
+                font=("Segoe UI", 9),
+                text_color=COLOR_TEXT_SECONDARY,
+                wraplength=300
+            )
+            notes.pack(anchor='w', pady=(0, 6))
         
         # Botones
         buttons = ctk.CTkFrame(main, fg_color="transparent")
@@ -112,6 +167,32 @@ class ModernContactCard(ctk.CTkFrame):
                 height=32
             )
             btn_delete.pack(side='left', padx=2, fill='x', expand=True)
+    
+    @staticmethod
+    def _get_status_icon(status):
+        """Obtener icono según estado"""
+        icons = {
+            'COMPLETADA': '✅',
+            'PENDIENTE': '⏳',
+            'EN PROGRESO': '📞',
+            'NO CONTACTADO': '❌',
+            'NO DISPONIBLE': '⛔',
+            'SIN GESTIONAR': '⚪'
+        }
+        return icons.get(status, '⚪')
+    
+    @staticmethod
+    def _get_status_color(status):
+        """Obtener color según estado"""
+        colors = {
+            'COMPLETADA': COLOR_SUCCESS,
+            'PENDIENTE': COLOR_WARNING,
+            'EN PROGRESO': COLOR_INFO,
+            'NO CONTACTADO': COLOR_DANGER,
+            'NO DISPONIBLE': COLOR_DANGER,
+            'SIN GESTIONAR': COLOR_TEXT_SECONDARY
+        }
+        return colors.get(status, COLOR_TEXT_SECONDARY)
 
 
 class ModernSearchBar(ctk.CTkFrame):
@@ -189,7 +270,7 @@ class StatusBar(ctk.CTkFrame):
 
 
 class CallManagerApp(ctk.CTk):
-    """CallManager v2.0 - Aplicación Principal"""
+    """CallManager v2.0 - Aplicación Principal con API"""
     
     def __init__(self):
         super().__init__()
@@ -198,9 +279,25 @@ class CallManagerApp(ctk.CTk):
         self.geometry('1100x750')
         self.minsize(900, 600)
         
+        # Configuración de API
+        self.headers = {
+            'Content-Type': 'application/json',
+            'X-API-Key': API_KEY
+        }
+        
         # Datos
         self.contacts = {}
         self.filtered_contacts = []
+        self.generator_window = None
+        
+        # InterPhone
+        self.interphone_controller = None
+        if interphone_available:
+            try:
+                self.interphone_controller = InterPhoneController()
+                logger.info("✅ InterPhone inicializado")
+            except Exception as e:
+                logger.warning(f"⚠️ InterPhone no disponible: {e}")
         
         logger.info("Inicializando CallManager v2.0...")
         
@@ -210,8 +307,8 @@ class CallManagerApp(ctk.CTk):
         # Build UI
         self._build_ui()
         
-        # Load contacts
-        self.load_contacts()
+        # Load contacts en thread para no bloquear UI
+        threading.Thread(target=self.load_contacts, daemon=True).start()
         
         logger.info("CallManager v2.0 listo")
     
@@ -325,35 +422,50 @@ class CallManagerApp(ctk.CTk):
         self.status_bar.pack(fill='x', padx=0, pady=0)
     
     def load_contacts(self):
-        """Cargar contactos desde JSON"""
+        """Cargar contactos desde API o JSON local"""
         try:
-            contacts_file = Path(__file__).parent.parent / 'demo_contacts.json'
+            # Intentar cargar desde API
+            try:
+                response = requests.get(
+                    f'{SERVER_URL}/contacts',
+                    headers=self.headers,
+                    timeout=5
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    self.contacts = {c['id']: c for c in data}
+                    logger.info(f"✅ {len(self.contacts)} contactos cargados desde API")
+                else:
+                    raise Exception("Error de API")
+            except:
+                # Fallback a JSON local
+                contacts_file = Path(__file__).parent.parent / 'demo_contacts.json'
+                
+                if contacts_file.exists():
+                    with open(contacts_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            self.contacts = {i: c for i, c in enumerate(data, 1)}
+                        else:
+                            self.contacts = data
+                    logger.info(f"✅ {len(self.contacts)} contactos cargados localmente")
+                else:
+                    # Contactos de demo
+                    self.contacts = {
+                        1: {'id': 1, 'name': 'Juan García', 'phone': '88883333', 'status': 'SIN GESTIONAR'},
+                        2: {'id': 2, 'name': 'María López', 'phone': '87654321', 'status': 'SIN GESTIONAR'},
+                        3: {'id': 3, 'name': 'Carlos Rodríguez', 'phone': '88889999', 'status': 'SIN GESTIONAR'},
+                        4: {'id': 4, 'name': 'Ana Martínez', 'phone': '87779999', 'status': 'SIN GESTIONAR'},
+                        5: {'id': 5, 'name': 'Pedro Sánchez', 'phone': '88881111', 'status': 'SIN GESTIONAR'},
+                    }
+                    logger.info("📭 Usando contactos de demo")
             
-            if contacts_file.exists():
-                with open(contacts_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        self.contacts = {i: c for i, c in enumerate(data, 1)}
-                    else:
-                        self.contacts = data
-                logger.info(f"✅ {len(self.contacts)} contactos cargados")
-            else:
-                # Contactos de demo
-                self.contacts = {
-                    1: {'id': 1, 'name': 'Juan García', 'phone': '88883333'},
-                    2: {'id': 2, 'name': 'María López', 'phone': '87654321'},
-                    3: {'id': 3, 'name': 'Carlos Rodríguez', 'phone': '88889999'},
-                    4: {'id': 4, 'name': 'Ana Martínez', 'phone': '87779999'},
-                    5: {'id': 5, 'name': 'Pedro Sánchez', 'phone': '88881111'},
-                }
-                logger.info("📭 Usando contactos de demo")
-            
-            self.render_contacts()
-            self.status_bar.update_status(True, len(self.contacts))
+            self.after(0, self.render_contacts)
+            self.after(0, lambda: self.status_bar.update_status(True, len(self.contacts)))
         
         except Exception as e:
             logger.error(f"Error cargando contactos: {e}")
-            messagebox.showerror("Error", f"No se pudieron cargar los contactos:\n{e}")
+            self.after(0, lambda: messagebox.showerror("Error", f"No se pudieron cargar los contactos:\n{e}"))
     
     def render_contacts(self):
         """Renderizar lista de contactos"""
@@ -399,56 +511,337 @@ class CallManagerApp(ctk.CTk):
     
     def call_contact(self, contact):
         """Hacer llamada a contacto"""
-        messagebox.showinfo("Llamada", f"Llamando a {contact.get('name', 'N/A')}\n{contact.get('phone', 'N/A')}")
-        logger.info(f"📞 Llamada a {contact.get('name')}")
+        try:
+            phone = contact.get('phone', '')
+            name = contact.get('name', 'N/A')
+            
+            # Intentar usar InterPhone
+            if self.interphone_controller:
+                try:
+                    normalized = normalize_phone_for_interphone(phone)
+                    self.interphone_controller.call(normalized)
+                    messagebox.showinfo('Llamada', f'📞 Llamada a {name} iniciada ✅')
+                    logger.info(f"📞 Llamada iniciada a {name} ({phone})")
+                    
+                    # Actualizar estado
+                    threading.Thread(
+                        target=self._update_contact_status,
+                        args=(contact.get('id'), 'EN PROGRESO'),
+                        daemon=True
+                    ).start()
+                except Exception as e:
+                    logger.error(f"Error con InterPhone: {e}")
+                    messagebox.showinfo('Llamada', f'📞 Llamada a {name} registrada (mock)')
+            else:
+                messagebox.showinfo('Llamada', f'📞 Llamada a {name} ({phone}) registrada')
+                logger.info(f"📞 Mock call a {name}")
+        
+        except Exception as e:
+            logger.error(f'Error en llamada: {e}')
+            messagebox.showerror('Error', f'Error en la llamada: {e}')
     
     def edit_contact(self, contact):
-        """Editar contacto"""
-        messagebox.showinfo("Editar", f"Editando a {contact.get('name', 'N/A')}")
-        logger.info(f"✏️ Editando {contact.get('name')}")
+        """Editar contacto con diálogo"""
+        try:
+            # Crear ventana de edición
+            edit_window = ctk.CTkToplevel(self)
+            edit_window.title(f"Editar: {contact.get('name')}")
+            edit_window.geometry('500x500')
+            edit_window.resizable(False, False)
+            
+            # Hacer modal
+            edit_window.transient(self)
+            edit_window.grab_set()
+            
+            # Frame contenedor
+            main_frame = ctk.CTkFrame(edit_window, fg_color=COLOR_BG)
+            main_frame.pack(fill='both', expand=True, padx=20, pady=20)
+            
+            # Nombre
+            ctk.CTkLabel(main_frame, text="Nombre:", font=("Segoe UI", 12, "bold")).pack(anchor='w', pady=(10, 0))
+            entry_name = ctk.CTkEntry(main_frame, placeholder_text="Nombre del contacto")
+            entry_name.insert(0, contact.get('name', ''))
+            entry_name.pack(fill='x', pady=(5, 10))
+            
+            # Teléfono
+            ctk.CTkLabel(main_frame, text="Teléfono:", font=("Segoe UI", 12, "bold")).pack(anchor='w', pady=(10, 0))
+            entry_phone = ctk.CTkEntry(main_frame, placeholder_text="Número telefónico")
+            entry_phone.insert(0, contact.get('phone', ''))
+            entry_phone.pack(fill='x', pady=(5, 10))
+            
+            # Estado
+            ctk.CTkLabel(main_frame, text="Estado:", font=("Segoe UI", 12, "bold")).pack(anchor='w', pady=(10, 0))
+            status_var = ctk.StringVar(value=contact.get('status', 'SIN GESTIONAR'))
+            status_menu = ctk.CTkOptionMenu(
+                main_frame,
+                variable=status_var,
+                values=['SIN GESTIONAR', 'PENDIENTE', 'EN PROGRESO', 'COMPLETADA', 'NO CONTACTADO', 'NO DISPONIBLE']
+            )
+            status_menu.pack(fill='x', pady=(5, 10))
+            
+            # Notas
+            ctk.CTkLabel(main_frame, text="Notas:", font=("Segoe UI", 12, "bold")).pack(anchor='w', pady=(10, 0))
+            text_notes = ctk.CTkTextbox(main_frame, height=150, font=("Segoe UI", 11))
+            text_notes.pack(fill='both', expand=True, pady=(5, 10))
+            text_notes.insert('1.0', contact.get('notes', ''))
+            
+            # Botones
+            button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+            button_frame.pack(fill='x', pady=(20, 0))
+            
+            def save_changes():
+                """Guardar cambios en base de datos"""
+                try:
+                    updated_data = {
+                        'name': entry_name.get(),
+                        'phone': entry_phone.get(),
+                        'status': status_var.get(),
+                        'notes': text_notes.get('1.0', 'end-1c')
+                    }
+                    
+                    # Actualizar en API
+                    contact_id = contact.get('id')
+                    response = requests.put(
+                        f'{SERVER_URL}/contacts/{contact_id}',
+                        json=updated_data,
+                        headers=self.headers,
+                        timeout=10
+                    )
+                    
+                    if response.status_code == 200:
+                        # Actualizar localmente
+                        for cid, c in self.contacts.items():
+                            if c.get('id') == contact_id:
+                                c.update(updated_data)
+                                break
+                        self.render_contacts()
+                        edit_window.destroy()
+                        messagebox.showinfo('Éxito', f'✅ {entry_name.get()} actualizado')
+                        logger.info(f"✏️ Contacto {contact_id} actualizado")
+                    else:
+                        messagebox.showerror('Error', f'Error actualizando contacto: {response.text}')
+                
+                except Exception as e:
+                    logger.error(f"Error guardando cambios: {e}")
+                    messagebox.showerror('Error', f'Error guardando cambios:\n{e}')
+            
+            def cancel():
+                edit_window.destroy()
+            
+            btn_save = ctk.CTkButton(
+                button_frame,
+                text="💾 Guardar",
+                command=save_changes,
+                fg_color=COLOR_SUCCESS,
+                hover_color="#27ae60"
+            )
+            btn_save.pack(side='left', padx=5, fill='x', expand=True)
+            
+            btn_cancel = ctk.CTkButton(
+                button_frame,
+                text="❌ Cancelar",
+                command=cancel,
+                fg_color=COLOR_DANGER,
+                hover_color="#c0392b"
+            )
+            btn_cancel.pack(side='left', padx=5, fill='x', expand=True)
+        
+        except Exception as e:
+            logger.error(f"Error en editar contacto: {e}")
+            messagebox.showerror("Error", f"Error editando contacto:\n{e}")
     
     def delete_contact(self, contact):
-        """Borrar contacto"""
-        if messagebox.askyesno("Borrar", f"¿Borrar a {contact.get('name')}?"):
-            # Encontrar y borrar
-            for cid, c in list(self.contacts.items()):
-                if c.get('id') == contact.get('id'):
-                    del self.contacts[cid]
-                    break
-            self.render_contacts()
-            logger.info(f"🗑️ Borrado {contact.get('name')}")
+        """Borrar contacto con confirmación"""
+        try:
+            if messagebox.askyesno("Confirmar", f"¿Borrar a {contact.get('name')}?"):
+                contact_id = contact.get('id')
+                
+                # Intentar borrar de API
+                try:
+                    response = requests.delete(
+                        f'{SERVER_URL}/contacts/{contact_id}',
+                        headers=self.headers,
+                        timeout=10
+                    )
+                    
+                    if response.status_code == 200:
+                        # Borrar localmente
+                        for cid in list(self.contacts.keys()):
+                            if self.contacts[cid].get('id') == contact_id:
+                                del self.contacts[cid]
+                                break
+                        self.render_contacts()
+                        messagebox.showinfo('Éxito', f'✅ {contact.get("name")} borrado')
+                        logger.info(f"🗑️ Contacto {contact_id} borrado")
+                except:
+                    # Fallback a borrado local
+                    for cid in list(self.contacts.keys()):
+                        if self.contacts[cid].get('id') == contact_id:
+                            del self.contacts[cid]
+                            break
+                    self.render_contacts()
+                    messagebox.showinfo('Éxito', f'✅ {contact.get("name")} borrado localmente')
+                    logger.info(f"🗑️ Contacto {contact_id} borrado (local)")
+        
+        except Exception as e:
+            logger.error(f'Error borrando contacto: {e}')
+            messagebox.showerror('Error', f'Error borrando contacto: {e}')
+    
+    def _update_contact_status(self, contact_id, status):
+        """Actualizar estado de contacto en background"""
+        try:
+            response = requests.put(
+                f'{SERVER_URL}/contacts/{contact_id}',
+                json={'status': status},
+                headers=self.headers,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                # Actualizar localmente
+                for cid, c in self.contacts.items():
+                    if c.get('id') == contact_id:
+                        c['status'] = status
+                        self.after(0, self.render_contacts)
+                        break
+                logger.info(f"📝 Estado actualizado: {contact_id} -> {status}")
+        except Exception as e:
+            logger.warning(f"No se pudo actualizar estado en API: {e}")
     
     def import_contacts(self):
-        """Importar contactos"""
-        file = filedialog.askopenfilename(
-            title="Importar contactos",
-            filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv"), ("All files", "*.*")]
-        )
-        if file:
-            messagebox.showinfo("Importar", f"Importando desde:\n{file}")
-            logger.info(f"📥 Importando desde {file}")
+        """Importar contactos desde archivo"""
+        try:
+            file = filedialog.askopenfilename(
+                title="Importar contactos",
+                filetypes=[("Excel files", "*.xlsx"), ("CSV files", "*.csv"), ("JSON files", "*.json"), ("All files", "*.*")]
+            )
+            if not file:
+                return
+            
+            # Leer archivo
+            try:
+                if file.endswith('.json'):
+                    with open(file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    contacts_data = data if isinstance(data, list) else list(data.values())
+                elif file.endswith('.csv'):
+                    import csv
+                    with open(file, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        contacts_data = list(reader)
+                else:  # Excel
+                    import pandas as pd
+                    df = pd.read_excel(file)
+                    contacts_data = df.to_dict('records')
+                
+                # Enviar a API
+                threading.Thread(
+                    target=self._import_thread,
+                    args=(contacts_data,),
+                    daemon=True
+                ).start()
+                
+                messagebox.showinfo('Importación', f'Importando {len(contacts_data)} contactos...')
+            
+            except Exception as e:
+                logger.error(f"Error leyendo archivo: {e}")
+                messagebox.showerror('Error', f'Error leyendo archivo:\n{e}')
+        
+        except Exception as e:
+            logger.error(f'Import error: {e}')
+            messagebox.showerror('Error', f'Error en importación: {e}')
+    
+    def _import_thread(self, contacts_data):
+        """Thread para importar en background"""
+        try:
+            for contact in contacts_data:
+                try:
+                    response = requests.post(
+                        f'{SERVER_URL}/contacts',
+                        json=contact,
+                        headers=self.headers,
+                        timeout=10
+                    )
+                    if response.status_code == 201:
+                        new_contact = response.json()
+                        self.contacts[new_contact['id']] = new_contact
+                except:
+                    pass
+            
+            self.after(0, self.render_contacts)
+            self.after(0, lambda: messagebox.showinfo('Éxito', '✅ Importación completada'))
+            logger.info(f"📥 Importados {len(contacts_data)} contactos")
+        except Exception as e:
+            logger.error(f"Import thread error: {e}")
     
     def export_contacts(self):
-        """Exportar contactos"""
-        file = filedialog.asksaveasfilename(
-            title="Exportar contactos",
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("CSV files", "*.csv")]
-        )
-        if file:
-            messagebox.showinfo("Exportar", f"Exportando a:\n{file}")
-            logger.info(f"📤 Exportando a {file}")
+        """Exportar contactos a archivo"""
+        try:
+            file = filedialog.asksaveasfilename(
+                title="Exportar contactos",
+                defaultextension='.xlsx',
+                filetypes=[("Excel files", "*.xlsx"), ("CSV files", "*.csv"), ("JSON files", "*.json")],
+                initialfile=f"contactos_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            if not file:
+                return
+            
+            # Exportar según formato
+            try:
+                contacts_list = list(self.contacts.values())
+                
+                if file.endswith('.json'):
+                    with open(file, 'w', encoding='utf-8') as f:
+                        json.dump(contacts_list, f, ensure_ascii=False, indent=2)
+                elif file.endswith('.csv'):
+                    import csv
+                    if contacts_list:
+                        keys = contacts_list[0].keys()
+                        with open(file, 'w', newline='', encoding='utf-8') as f:
+                            writer = csv.DictWriter(f, fieldnames=keys)
+                            writer.writeheader()
+                            writer.writerows(contacts_list)
+                else:  # Excel
+                    import pandas as pd
+                    df = pd.DataFrame(contacts_list)
+                    df.to_excel(file, index=False)
+                
+                messagebox.showinfo('Éxito', f'✅ Contactos exportados a:\n{file}')
+                logger.info(f"📤 Exportados {len(contacts_list)} contactos a {file}")
+            
+            except Exception as e:
+                logger.error(f"Error exportando: {e}")
+                messagebox.showerror('Error', f'Error exportando:\n{e}')
+        
+        except Exception as e:
+            logger.error(f'Export error: {e}')
+            messagebox.showerror('Error', f'Error en exportación: {e}')
     
     def open_generator(self):
-        """Abrir generador de números"""
-        messagebox.showinfo("Generador", "Abriendo generador de números telefónicos")
-        logger.info("📱 Generador abierto")
+        """Abrir generador de números telefónicos"""
+        try:
+            # Intentar importar PhoneGeneratorWindow
+            try:
+                from phone_generator_window import PhoneGeneratorWindow
+                if self.generator_window is None or not self.generator_window.winfo_exists():
+                    self.generator_window = PhoneGeneratorWindow(self, SERVER_URL, API_KEY)
+                    logger.info("📱 Generador abierto")
+                else:
+                    self.generator_window.lift()
+                    self.generator_window.focus()
+            except ImportError:
+                messagebox.showinfo("Generador", "Módulo de generador no disponible")
+                logger.warning("⚠️ PhoneGeneratorWindow no encontrado")
+        
+        except Exception as e:
+            logger.error(f'Error abriendo generador: {e}')
+            messagebox.showerror('Error', f'Error abriendo generador:\n{e}')
     
     def refresh_contacts(self):
-        """Refrescar contactos"""
-        self.load_contacts()
-        messagebox.showinfo("Refrescar", "Contactos refrescados")
-        logger.info("🔄 Contactos refrescados")
+        """Refrescar contactos desde servidor"""
+        threading.Thread(target=self.load_contacts, daemon=True).start()
+        messagebox.showinfo("Refrescar", "Refrescando contactos...")
+        logger.info("🔄 Refrescando contactos")
     
     def toggle_theme(self):
         """Cambiar tema"""
