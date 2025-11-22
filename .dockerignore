@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+*.egg-info
+.pytest_cache
+.coverage
+
+# IDE
+.vscode
+.vs
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Datos
+contacts.db
+contacts.db-wal
+contacts.db-shm
+*.db
+backups/
+logs/
+
+# Documentación (opcional, si es muy grande)
+docs/
+
+# Otros
+node_modules/
+.continue/
+.pytest_cache/
+callmanager.log

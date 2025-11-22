@@ -21,23 +21,23 @@ import sys
 
 # Agregar directorios al path para imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
+ui_dir = os.path.join(current_dir, 'ui')
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
+if ui_dir not in sys.path:
+    sys.path.insert(0, ui_dir)
 
 from interphone_controller import InterPhoneController, normalize_phone_for_interphone
 from config_loader import load_config
 
-# Importar desde directorio padre
+# Importar desde client/ui/
 try:
     from phone_generator_window import PhoneGeneratorWindow
 except ImportError:
     # Fallback si es necesario
     import importlib.util
     spec = importlib.util.spec_from_file_location("phone_generator_window", 
-                                                    os.path.join(parent_dir, "phone_generator_window.py"))
+                                                    os.path.join(ui_dir, "phone_generator_window.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     PhoneGeneratorWindow = module.PhoneGeneratorWindow
