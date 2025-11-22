@@ -92,7 +92,7 @@ def init_users():
         
         # Crear usuarios
         print("\n" + "="*60)
-        print("👥 INICIALIZANDO USUARIOS DE PRUEBA")
+        print("INICIALIZANDO USUARIOS DE PRUEBA")
         print("="*60)
         
         for user_data in test_users:
@@ -121,12 +121,12 @@ def init_users():
             )
             db.add(metrics)
             
-            print(f"✅ {user_data['role']:15} | {user_data['username']:20} | {user_data['api_key']}")
+            print(f"[OK] {user_data['role']:<15} | {user_data['username']:<20} | {user_data['api_key']}")
         
         db.commit()
         
         print("\n" + "="*60)
-        print("📋 RESUMEN DE PERMISOS")
+        print("RESUMEN DE PERMISOS")
         print("="*60)
         print("""
 Agent:

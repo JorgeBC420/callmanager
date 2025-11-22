@@ -17,30 +17,9 @@ import json
 import logging
 import os
 import re
-import sys
-
-# Agregar directorios al path para imports
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
-
 from interphone_controller import InterPhoneController, normalize_phone_for_interphone
 from config_loader import load_config
-
-# Importar desde directorio padre
-try:
-    from phone_generator_window import PhoneGeneratorWindow
-except ImportError:
-    # Fallback si es necesario
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("phone_generator_window", 
-                                                    os.path.join(parent_dir, "phone_generator_window.py"))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    PhoneGeneratorWindow = module.PhoneGeneratorWindow
+from phone_generator_window import PhoneGeneratorWindow
 
 # ========== LOGGING ==========
 logging.basicConfig(
@@ -620,26 +599,12 @@ class CallManagerApp(ctk.CTk):
             logger.info(f"Attempting to call: {phone}")
             
             if not self.interphone_controller:
-                try:
-                    self.interphone_controller = InterPhoneController()
-                    self.interphone_controller.connect()
-                    self.interphone_controller.call(phone)
-                    logger.info(f"Call initiated to {phone}")
-                    messagebox.showinfo('Llamada', f'Llamada a {phone} iniciada ✅')
-                except RuntimeError as re:
-                    logger.warning(f'InterPhone not available: {re}')
-                    messagebox.showwarning('InterPhone No Disponible', 
-                                         f'InterPhone no está instalado/ejecutándose.\n\n'
-                                         f'Número a marcar: {phone}\n\n'
-                                         f'Puedes marcarlo manualmente.')
-                except Exception as ip_error:
-                    logger.warning(f'InterPhone error: {ip_error}')
-                    messagebox.showwarning('InterPhone No Disponible', 
-                                         f'InterPhone no disponible en esta PC.\n\n'
-                                         f'Número: {phone}')
-            else:
-                self.interphone_controller.call(phone)
-                messagebox.showinfo('Llamada', f'Llamada a {phone} iniciada ✅')
+                self.interphone_controller = InterPhoneController()
+            
+            self.interphone_controller.connect()
+            self.interphone_controller.call(phone)
+            logger.info(f"Call initiated to {phone}")
+            messagebox.showinfo('Llamada', f'Llamada a {phone} iniciada ✅')
             
         except Exception as e:
             logger.error(f'Call error: {e}')

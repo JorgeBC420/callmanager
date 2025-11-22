@@ -43,11 +43,58 @@ Edita client/config_local.json (cópialo de config_local.example.json):
 python server.py
 ```
 
+**Primer inicio**: Se crea automáticamente el usuario:
+- Usuario: `admin`
+- Contraseña: `1234`
+- ⚠️ Cambiar contraseña inmediatamente en producción
+
 ### Paso 4: Ejecutar Cliente (cada PC)
 ```bash
 cd client
 python call_manager_app.py
 ```
+
+---
+
+## 🔐 Autenticación (v3.3.1+)
+
+CallManager ahora incluye un **sistema de autenticación de 2 niveles**:
+
+### 1. **Login de Usuario** (para humanos)
+```bash
+POST /auth/login
+{
+  "username": "agente1",
+  "password": "contraseña"
+}
+```
+
+Devuelve JWT token válido por 24 horas.
+
+### 2. **API Keys** (para integraciones)
+Se genera automáticamente al crear usuario.
+Usar en header: `X-API-Key: tu_api_key`
+
+### Características de Seguridad
+- ✅ Contraseñas hasheadas con bcrypt
+- ✅ JWT tokens con 24h expiration
+- ✅ Rate limiting en endpoints críticos
+- ✅ Rate limit: 10 intentos/min en login
+- ✅ Role-Based Access Control (RBAC)
+
+### Cambiar Contraseña
+```bash
+POST /auth/change-password
+X-API-Key: tu_api_key
+
+{
+  "old_password": "contraseña_actual",
+  "new_password": "nueva_contraseña",
+  "confirm_password": "nueva_contraseña"
+}
+```
+
+📖 **Documentación completa**: Ver `AUTENTICACION.md`
 
 ---
 

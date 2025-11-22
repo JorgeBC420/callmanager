@@ -1,4 +1,4 @@
-﻿from flask import Flask, request, jsonify
+﻿from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from flask_limiter import Limiter
@@ -8,11 +8,14 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.pool import Pool
 from datetime import datetime, timedelta
+import bcrypt
+import jwt
 import json
 import os
 import logging
 import shutil
 import re
+import secrets
 from functools import wraps
 from dateutil.relativedelta import relativedelta
 
@@ -152,6 +155,7 @@ class User(Base):
     id = Column(String, primary_key=True)
     api_key = Column(String, unique=True, nullable=False, index=True)
     username = Column(String, unique=True, nullable=False, index=True)
+    password_hash = Column(String, nullable=False)  # Hash de contraseña (bcrypt)
     role = Column(String, default="Agent", index=True)  # Agent, TeamLead, ProjectManager, TI
     team_id = Column(String, index=True)  # Para agrupar agentes en equipos
     team_name = Column(String)  # Nombre del equipo (ej: "Equipo Ventas", "Equipo Support")
@@ -216,6 +220,56 @@ def validate_api_key(api_key):
         if not api_key or api_key not in AUTH_TOKENS:
             return False, "API key inválida o no proporcionada"
     return True, ""
+
+def hash_password(password: str) -> str:
+    """
+    Hash de contraseña usando bcrypt.
+    Genera salt automáticamente y retorna string listo para guardar en BD.
+    """
+    salt = bcrypt.gensalt(rounds=10)  # rounds=10 es estándar (más = más lento pero más seguro)
+    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+    return hashed.decode('utf-8')
+
+def verify_password(password: str, password_hash: str) -> bool:
+    """
+    Verificar contraseña contra hash almacenado.
+    Retorna True si coinciden, False si no.
+    """
+    try:
+        return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+    except Exception as e:
+        logger.error(f"Error verifying password: {e}")
+        return False
+
+def generate_jwt_token(user_id: str, username: str, role: str) -> str:
+    """
+    Generar JWT token para sesión del usuario.
+    Token expira en 24 horas.
+    """
+    payload = {
+        'user_id': user_id,
+        'username': username,
+        'role': role,
+        'iat': datetime.utcnow(),
+        'exp': datetime.utcnow() + timedelta(hours=24)
+    }
+    token = jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+    return token
+
+def verify_jwt_token(token: str):
+    """
+    Verificar y decodificar JWT token.
+    Retorna payload si es válido, None si no.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        return payload
+    except jwt.ExpiredSignatureError:
+        logger.warning("Token expired")
+        return None
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"Invalid token: {e}")
+        return None
 
 def normalize_phone(phone: str) -> str:
     """
@@ -492,6 +546,212 @@ def cleanup_expired_locks():
         Session.remove()
 
 
+@app.route('/auth/register', methods=['POST'])
+@limiter.limit("5 per minute")  # Limitar registros
+def register():
+    """
+    Registrar nuevo usuario.
+    
+    Body:
+    {
+        "username": "agente1",
+        "password": "mi_contraseña",
+        "role": "Agent",
+        "team_name": "Equipo Ventas"
+    }
+    """
+    db = Session()
+    try:
+        data = request.get_json()
+        username = data.get('username', '').strip()
+        password = data.get('password', '').strip()
+        role = data.get('role', 'Agent')
+        team_name = data.get('team_name', '')
+        
+        # Validaciones
+        if not username or len(username) < 3:
+            return jsonify({'error': 'Username debe tener mínimo 3 caracteres'}), 400
+        
+        if not password or len(password) < 4:
+            return jsonify({'error': 'Password debe tener mínimo 4 caracteres'}), 400
+        
+        if role not in ['Agent', 'TeamLead', 'ProjectManager', 'TI']:
+            return jsonify({'error': 'Role inválido'}), 400
+        
+        # Verificar que no existe usuario
+        existing = db.query(User).filter_by(username=username).first()
+        if existing:
+            return jsonify({'error': 'Usuario ya existe'}), 409
+        
+        # Crear usuario
+        user_id = f"user_{username}_{datetime.utcnow().timestamp()}"
+        password_hash = hash_password(password)
+        api_key = secrets.token_urlsafe(32)
+        
+        user = User(
+            id=user_id,
+            username=username,
+            password_hash=password_hash,
+            api_key=api_key,
+            role=role,
+            team_name=team_name,
+            is_active=1
+        )
+        
+        db.add(user)
+        db.commit()
+        
+        logger.info(f"New user registered: {username} ({role})")
+        
+        return jsonify({
+            'success': True,
+            'user_id': user_id,
+            'username': username,
+            'role': role,
+            'api_key': api_key,
+            'message': 'Usuario creado exitosamente. Guarda tu API Key en lugar seguro.'
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"Registration error: {e}")
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+@app.route('/auth/login', methods=['POST'])
+@limiter.limit("10 per minute")  # Limitar intentos
+def login():
+    """
+    Login de usuario con usuario/contraseña.
+    
+    Body:
+    {
+        "username": "agente1",
+        "password": "mi_contraseña"
+    }
+    
+    Response:
+    {
+        "token": "jwt_token_aqui",
+        "user": {
+            "id": "user_...",
+            "username": "agente1",
+            "role": "Agent"
+        }
+    }
+    """
+    db = Session()
+    try:
+        data = request.get_json()
+        username = data.get('username', '').strip()
+        password = data.get('password', '').strip()
+        
+        if not username or not password:
+            return jsonify({'error': 'Username y password requeridos'}), 400
+        
+        # Buscar usuario
+        user = db.query(User).filter_by(username=username, is_active=1).first()
+        if not user:
+            logger.warning(f"Login attempt for non-existent user: {username}")
+            return jsonify({'error': 'Usuario o contraseña incorrectos'}), 401
+        
+        # Verificar contraseña
+        if not verify_password(password, user.password_hash):
+            logger.warning(f"Failed login attempt for user: {username}")
+            return jsonify({'error': 'Usuario o contraseña incorrectos'}), 401
+        
+        # Generar token JWT
+        token = generate_jwt_token(user.id, user.username, user.role)
+        
+        # Actualizar last_login
+        user.last_login = datetime.utcnow()
+        db.commit()
+        
+        logger.info(f"User logged in: {username}")
+        
+        return jsonify({
+            'success': True,
+            'token': token,
+            'user': {
+                'id': user.id,
+                'username': user.username,
+                'role': user.role,
+                'team_name': user.team_name
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Login error: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+@app.route('/auth/change-password', methods=['POST'])
+@require_auth
+def change_password():
+    """
+    Cambiar contraseña del usuario autenticado.
+    
+    Headers:
+    X-API-Key: api_key_valida (o usar JWT token)
+    
+    Body:
+    {
+        "old_password": "contraseña_actual",
+        "new_password": "nueva_contraseña",
+        "confirm_password": "nueva_contraseña"
+    }
+    """
+    db = Session()
+    try:
+        # Obtener usuario desde API Key
+        api_key = request.headers.get('X-API-Key')
+        user = db.query(User).filter_by(api_key=api_key, is_active=1).first()
+        
+        if not user:
+            return jsonify({'error': 'Usuario no encontrado'}), 404
+        
+        data = request.get_json()
+        old_password = data.get('old_password', '').strip()
+        new_password = data.get('new_password', '').strip()
+        confirm_password = data.get('confirm_password', '').strip()
+        
+        # Validaciones
+        if not old_password:
+            return jsonify({'error': 'old_password requerida'}), 400
+        
+        if not verify_password(old_password, user.password_hash):
+            logger.warning(f"Failed password change attempt for user: {user.username}")
+            return jsonify({'error': 'Contraseña actual incorrecta'}), 401
+        
+        if len(new_password) < 4:
+            return jsonify({'error': 'Nueva contraseña debe tener mínimo 4 caracteres'}), 400
+        
+        if new_password != confirm_password:
+            return jsonify({'error': 'Las contraseñas no coinciden'}), 400
+        
+        # Actualizar contraseña
+        user.password_hash = hash_password(new_password)
+        db.commit()
+        
+        logger.info(f"Password changed for user: {user.username}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Contraseña actualizada exitosamente'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Password change error: {e}")
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
 @app.route('/import', methods=['POST'])
 @limiter.limit(f"{IMPORT_RATE_LIMIT_PER_MINUTE} per minute")  # Rate limiting: máximo N imports por minuto
 @require_auth
@@ -613,6 +873,59 @@ def import_contacts():
         return jsonify({'error': str(e), 'errors': errors}), 500
     finally:
         Session.remove()
+
+
+@app.route('/export', methods=['GET'])
+@require_auth
+def export_contacts_excel():
+    """
+    Exportar todos los contactos a Excel.
+    
+    Response: Archivo Excel (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet)
+    """
+    db = Session()
+    try:
+        import pandas as pd
+        from io import BytesIO
+        
+        # Obtener contactos
+        rows = get_contacts_sorted_by_priority(db)
+        data = []
+        
+        for r in rows:
+            data.append({
+                'ID': r.id,
+                'Teléfono': r.phone,
+                'Nombre': r.name,
+                'Estado': r.status,
+                'Nota': r.note or '',
+                'Bloqueado Por': r.locked_by or '',
+                'Última Actualización': r.updated_at.isoformat() if r.updated_at else '',
+                'Creado': r.created_at.isoformat() if r.created_at else ''
+            })
+        
+        # Crear DataFrame
+        df = pd.DataFrame(data)
+        
+        # Crear archivo en memoria
+        output = BytesIO()
+        df.to_excel(output, index=False, sheet_name='Contactos')
+        output.seek(0)
+        
+        logger.info(f"Exported {len(data)} contacts to Excel")
+        
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=f'contactos_callmanager_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+        )
+    
+    except Exception as e:
+        logger.error(f"Export error: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
 
 
 @app.route('/contacts', methods=['GET'])
@@ -1041,6 +1354,148 @@ def update_config(current_user):
         db.remove()
 
 
+@app.route('/contacts/<contact_id>', methods=['DELETE'])
+@require_auth
+def delete_contact(contact_id):
+    """
+    Eliminar un contacto.
+    Accesible por: ProjectManager, TI
+    """
+    db = Session()
+    try:
+        # Obtener usuario del API key para verificar rol
+        api_key = request.headers.get('X-API-Key')
+        user = get_user_from_api_key(api_key)
+        
+        if not user or user.role not in ['ProjectManager', 'TI']:
+            return jsonify({'error': 'Access denied. Only ProjectManager and TI can delete contacts'}), 403
+        
+        # Buscar contacto
+        contact = db.query(Contact).filter(Contact.id == contact_id).first()
+        if not contact:
+            return jsonify({'error': f'Contact not found: {contact_id}'}), 404
+        
+        # Eliminar
+        contact_name = contact.name
+        contact_phone = contact.phone
+        db.delete(contact)
+        db.commit()
+        
+        logger.warning(f"Contact deleted by {user.username}: {contact_id} ({contact_name} {contact_phone})")
+        
+        # Notificar a todos los clientes
+        socketio.emit('contact_deleted', {
+            'id': contact_id,
+            'name': contact_name,
+            'phone': contact_phone,
+            'deleted_by': user.username,
+            'ts': datetime.utcnow().isoformat()
+        }, broadcast=True)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Contact deleted: {contact_name}',
+            'id': contact_id
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error deleting contact {contact_id}: {e}")
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+@app.route('/api/generate_contacts', methods=['POST'])
+@require_auth
+def api_generate_contacts():
+    """
+    Generar números telefónicos realistas de Costa Rica.
+    
+    Request JSON:
+    {
+        "amount": 100,              # Cantidad de números (default: 100)
+        "method": "stratified",     # stratified, simple, random (default: stratified)
+        "save": true                # Guardar en BD como contactos (default: false)
+    }
+    
+    Response: Array de números con estructura:
+    {
+        "phones": [
+            {"number": "81234567", "operator": "Kölbi", "formatted": "8123-4567"},
+            ...
+        ]
+    }
+    """
+    db = Session()
+    try:
+        data = request.get_json()
+        amount = data.get('amount', 100)
+        method = data.get('method', 'stratified')
+        save_to_db = data.get('save', False)
+        
+        # Validar parámetros
+        if not isinstance(amount, int) or amount <= 0 or amount > 1000:
+            return jsonify({'error': 'amount debe ser 1-1000'}), 400
+        
+        if method not in ['stratified', 'simple', 'random']:
+            return jsonify({'error': f'method debe ser: stratified, simple, random'}), 400
+        
+        # Generar teléfonos
+        from phone_generator import generate_cr_phones
+        phones = generate_cr_phones(count=amount, method=method)
+        
+        logger.info(f"Generated {len(phones)} phone numbers (method={method})")
+        
+        # Opcionalmente guardar en BD
+        if save_to_db:
+            imported = 0
+            for p in phones:
+                try:
+                    # Evitar duplicados
+                    contact_id = p['number']
+                    existing = db.query(Contact).filter(Contact.id == contact_id).first()
+                    
+                    if not existing:
+                        contact = Contact(
+                            id=contact_id,
+                            phone=p['formatted'],  # Guardar con formato
+                            name=f"Generated-{p['operator']}-{p['number']}",
+                            status='SIN_GESTIONAR',
+                            coords=json.dumps({}),
+                            editors_history=json.dumps([]),
+                            last_visibility_time=datetime.utcnow(),
+                            version=1
+                        )
+                        db.add(contact)
+                        imported += 1
+                except Exception as e:
+                    logger.warning(f"Error saving phone {p['number']}: {e}")
+            
+            db.commit()
+            logger.info(f"Saved {imported} contacts to database")
+            
+            # Notificar clientes
+            socketio.emit('bulk_update', {
+                'message': 'contacts_generated',
+                'count': imported
+            }, broadcast=True)
+        
+        return jsonify({
+            'success': True,
+            'count': len(phones),
+            'saved': imported if save_to_db else 0,
+            'phones': phones
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error generating contacts: {e}")
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check para monitoreo"""
@@ -1054,6 +1509,61 @@ def health_check():
         return jsonify({'status': 'unhealthy', 'error': str(e)}), 500
 
 
+@app.route('/admin/users', methods=['GET'])
+@require_role('TI')
+def list_users():
+    """Listar todos los usuarios (solo TI)"""
+    db = Session()
+    try:
+        users = db.query(User).filter_by(is_active=1).all()
+        user_list = []
+        for user in users:
+            user_list.append({
+                'id': user.id,
+                'username': user.username,
+                'role': user.role,
+                'team_name': user.team_name,
+                'email': user.email,
+                'last_login': user.last_login.isoformat() if user.last_login else None,
+                'created_at': user.created_at.isoformat() if user.created_at else None
+            })
+        return jsonify(user_list), 200
+    except Exception as e:
+        logger.error(f"Error listing users: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
+@app.route('/admin/users/<user_id>', methods=['DELETE'])
+@require_role('TI')
+def delete_user(user_id):
+    """Desactivar usuario (solo TI)"""
+    db = Session()
+    try:
+        user = db.query(User).filter_by(id=user_id).first()
+        if not user:
+            return jsonify({'error': 'Usuario no encontrado'}), 404
+        
+        # No permitir borrar al último admin
+        admin_count = db.query(User).filter_by(role='TI', is_active=1).count()
+        if user.role == 'TI' and admin_count <= 1:
+            return jsonify({'error': 'No se puede borrar el último admin'}), 400
+        
+        user.is_active = 0
+        db.commit()
+        
+        logger.info(f"User deactivated: {user.username}")
+        
+        return jsonify({'success': True, 'message': f'Usuario {user.username} desactivado'}), 200
+    except Exception as e:
+        logger.error(f"Error deleting user: {e}")
+        db.rollback()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db.remove()
+
+
 if __name__ == '__main__':
     logger.info("=" * 60)
     logger.info("Starting CallManager Server")
@@ -1065,6 +1575,19 @@ if __name__ == '__main__':
     logger.warning("IMPORTANT: Make sure port 5000 is open in Windows Firewall")
     logger.warning("IMPORTANT: Run server on a machine with a static IP")
     logger.warning("=" * 60)
+
+    # Crear usuario por defecto si no existen usuarios
+    try:
+        db = Session()
+        user_count = db.query(User).count()
+        Session.remove()
+        
+        if user_count == 0:
+            logger.info("Creating default user (admin/1234)...")
+            from init_default_user import create_default_user
+            create_default_user()
+    except Exception as e:
+        logger.warning(f"Could not create default user: {e}")
 
     # Crear backup inicial
     create_backup()

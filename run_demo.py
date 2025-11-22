@@ -54,7 +54,7 @@ def print_usage():
 
 2. CLIENTE (ejecuta en otra terminal)
    Windows:
-     cd c:\Users\bjorg\OneDrive\Desktop\callmanager\client
+     cd c:/Users/bjorg/OneDrive/Desktop/callmanager/client
      python call_manager_app.py
    
    El cliente se conectará automáticamente a localhost:5000
@@ -127,7 +127,7 @@ def main():
 
 1. Abre OTRA terminal (no cierres esta)
    Windows:
-     cd c:\Users\bjorg\OneDrive\Desktop\callmanager\client
+     cd c:/Users/bjorg/OneDrive/Desktop/callmanager/client
      python call_manager_app.py
 
 2. La app debería conectar automáticamente a localhost:5000
